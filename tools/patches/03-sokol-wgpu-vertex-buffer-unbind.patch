@@ -1,0 +1,17 @@
+--- a/sokol_gfx.h	2026-07-18 18:32:26.248680593 -0700
++++ b/sokol_gfx.h	2026-07-18 18:33:35.652904472 -0700
+@@ -17924,7 +17924,13 @@
+                 SOKOL_ASSERT(buf_size > offset);
+                 const uint64_t max_bytes = buf_size - offset;
+                 wgpuRenderPassEncoderSetVertexBuffer(_sg.wgpu.rpass_enc, slot, vb->wgpu.buf, offset, max_bytes);
+-            } else {
++            } else if (bnd->pip && bnd->pip->cmn.vertex_buffer_layout_active[slot]) {
++                // Only unbind a slot the pipeline actually uses. Unused slots
++                // don't need unbinding, and the emdawnwebgpu JS wrapper turns
++                // a null WGPUBuffer into `undefined` (not `null`) for
++                // setVertexBuffer, which WebGPU rejects. Bindings-free
++                // pipelines (e.g. the sky/BRDF-LUT passes) have no active
++                // vertex-buffer slots, so this skips the unbind for them.
+                 wgpuRenderPassEncoderSetVertexBuffer(_sg.wgpu.rpass_enc, slot, 0, 0, 0);
+             }
+             _sg_stats_inc(wgpu.bindings.num_set_vertex_buffer);

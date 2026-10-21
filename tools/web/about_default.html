@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en-us">
+<head>
+	<meta charset="utf-8">
+	<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+	<title>About</title>
+	<meta name="viewport" content="width=device-width">
+	<!-- The page ships both palettes; the user's browser color scheme decides. -->
+	<meta name="color-scheme" content="dark light">
+	<style>
+		:root {
+			--bg: #1a1a2e;
+			--fg: #b8c2d8;
+			--accent: #8be9fd;
+			--muted: #6b7694;
+		}
+		/* Respect the user's browser setting (no forced theme). */
+		@media (prefers-color-scheme: light) {
+			:root {
+				--bg: #f4f5f8;
+				--fg: #2b3040;
+				--accent: #0e7490;
+				--muted: #5c6675;
+			}
+		}
+		body {
+			margin: 0; background-color: var(--bg); color: var(--fg);
+			font-family: "SF Mono", Consolas, monospace;
+			font-size: 0.95rem; line-height: 1.55;
+		}
+		.page { max-width: 600px; margin: 0 auto; padding: 40px 24px 64px; }
+		h1 { color: var(--accent); font-size: 1.5rem; margin: 0 0 12px; }
+		a { color: var(--accent); }
+		.back { display: inline-block; margin-bottom: 24px; }
+	</style>
+</head>
+<body>
+	<div class="page">
+		<a class="back" href="index.html">&larr; back to the game</a>
+		<script>
+			// Framed in the game's About overlay (about.html?embed=1): the
+			// overlay's close button is the exit, so drop the standalone
+			// back link there.
+			if (new URLSearchParams(window.location.search).has("embed")) {
+				var _back = document.querySelector(".back");
+				if (_back) {_back.remove();}
+			}
+		</script>
+		<h1>About</h1>
+		<p>
+			This app is built in Odin on Box3D physics and a sokol-based
+			GPU PBR renderer (WebGPU, with a WebGL2 fallback).
+		</p>
+		<p>
+			This app has no about page of its own yet. The game is the doc.
+		</p>
+	</div>
+</body>
+</html>

@@ -1,0 +1,22 @@
+# ── OS ──
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# ── Python ──
+__pycache__/
+
+# ── Build outputs ──
+/build/
+/apps/*/build/
+/vendor/box3d/build_*/
+/vendor/box3d/COMMIT.txt
+/vendor/sokol/COMMIT.txt
+/engine/lib/
+/engine/graphics/renderer/shaders/generated/*.glsl.h
+*.o
+*.wasm
+*.wasm.o
+
+# ── Cloudflare wrangler ──
+/.wrangler/

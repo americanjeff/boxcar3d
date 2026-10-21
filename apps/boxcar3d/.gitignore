@@ -1,0 +1,6 @@
+# Runtime data store: seeded genome + trained brains (data/brains/).
+# Created at runtime; not committed.
+data/
+
+# Native build output.
+build/

@@ -1,0 +1,519 @@
+<!doctype html>
+<html lang="en-us">
+<head>
+	<meta charset="utf-8">
+	<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+	<title>@TITLE@</title>
+	<meta name="viewport" content="width=device-width">
+	<meta property="og:title" content="@TITLE@">
+	<meta property="og:type" content="website">
+	<meta property="og:url" content="@OG_URL@">
+	<meta property="og:description" content="@OG_DESCRIPTION@">
+	<meta property="og:image" content="@OG_IMAGE@">
+	<style>
+		body { margin: 0px; overflow: hidden; background-color: #1a1a2e; overscroll-behavior: none; }
+		canvas.game_canvas {
+			border: 0px none; background-color: #1a1a2e;
+			padding-left: 0; padding-right: 0;
+			margin-left: auto; margin-right: auto;
+			display: block;
+			width: 100vw; height: 100vh;
+			touch-action: none;
+			-webkit-user-select: none; user-select: none;
+		}
+		#status {
+			position: fixed; bottom: 8px; left: 12px;
+			color: #8be9fd; font-size: 0.85rem; z-index: 10;
+			font-family: "SF Mono", Consolas, monospace;
+		}
+		#about-btn {
+			position: fixed; top: 8px; right: 12px;
+			width: 30px; height: 30px; line-height: 28px;
+			text-align: center; z-index: 10; cursor: pointer;
+			color: #8be9fd; font-size: 1.1rem; font-weight: 600;
+			font-family: "SF Mono", Consolas, monospace;
+			background-color: rgba(26, 26, 46, 0.6);
+			border: 1px solid rgba(139, 233, 253, 0.35);
+			border-radius: 50%; text-decoration: none;
+		}
+		#about-btn:hover { background-color: rgba(139, 233, 253, 0.2); color: #ffffff; }
+		#about-overlay {
+			position: fixed; inset: 0; z-index: 100;
+			display: flex; align-items: center; justify-content: center;
+			background-color: rgba(10, 10, 20, 0.55);
+		}
+		#about-overlay[hidden] { display: none; }
+		.about-panel {
+			position: relative;
+			width: min(760px, calc(100vw - 32px));
+			height: min(880px, calc(100vh - 32px));
+			background-color: #101018;
+			border: 1px solid rgba(139, 233, 253, 0.35);
+			border-radius: 8px; overflow: hidden;
+		}
+		.about-head {
+			display: flex; justify-content: space-between; align-items: center;
+			height: 34px; padding: 0 10px;
+			color: #8be9fd; font-family: "SF Mono", Consolas, monospace;
+			font-size: 0.85rem;
+			background-color: rgba(26, 26, 46, 0.9);
+		}
+		#about-close {
+			cursor: pointer; border: none; background: none; color: #8be9fd;
+			font-size: 1.2rem; line-height: 1; padding: 2px 6px;
+		}
+		#about-close:hover { color: #ffffff; }
+		.about-frame {
+			display: block; width: 100%; height: calc(100% - 34px);
+			border: none; background: #1a1a2e;
+		}
+		#share-overlay {
+			position: fixed; inset: 0; z-index: 100;
+			display: flex; align-items: center; justify-content: center;
+			background-color: rgba(10, 10, 20, 0.55);
+		}
+		#share-overlay[hidden] { display: none; }
+		.share-panel {
+			position: relative;
+			width: min(860px, calc(100vw - 32px));
+			max-height: calc(100vh - 32px); overflow-y: auto;
+			background-color: #101018;
+			border: 1px solid rgba(139, 233, 253, 0.35);
+			border-radius: 8px;
+			padding: 14px 16px 18px;
+			color: #e8e8f0;
+			font-family: "SF Mono", Consolas, monospace;
+		}
+		#share-close {
+			position: absolute; top: 8px; right: 10px;
+			cursor: pointer; border: none; background: none; color: #8be9fd;
+			font-size: 1.3rem; line-height: 1; padding: 2px 6px;
+		}
+		#share-close:hover { color: #ffffff; }
+		#share-hero {
+			display: block; flex: 1; min-width: 0; max-width: 460px;
+			aspect-ratio: 720 / 480; image-rendering: auto;
+		}
+		#share-tiles {
+			display: flex; gap: 6px; overflow-x: auto;
+			padding: 14px 2px 10px;
+		}
+		.share-mid {
+			display: flex; align-items: center; gap: 16px;
+		}
+		.share-sep {
+			height: 1px; margin: 12px 0;
+			background: rgba(139, 233, 253, 0.15);
+		}
+		.share-tile {
+			position: relative; flex: 0 0 auto;
+			width: 68px; height: 27px; padding: 0;
+			background: #1a1a2e; border: 1px solid rgba(139, 233, 253, 0.25);
+			border-radius: 4px; cursor: pointer;
+		}
+		.share-tile.sel { border-color: #8be9fd; box-shadow: 0 0 6px rgba(139, 233, 253, 0.5); }
+		.share-tile img { display: block; width: 68px; height: 27px; pointer-events: none; }
+		.share-tile .share-tile-n {
+			position: absolute; right: 2px; bottom: 0;
+			font-size: 9px; color: #8be9fd; pointer-events: none;
+		}
+		.share-tile .share-tile-t {
+			position: absolute; left: 2px; top: 0;
+			font-size: 10px; color: #ffd700; pointer-events: none;
+		}
+		.share-urlrow {
+			display: flex; align-items: center; gap: 10px;
+		}
+		#share-url {
+			flex: 1; font-size: 0.8rem; color: #8be9fd;
+			word-break: break-all; line-height: 1.35;
+		}
+		#share-qr {
+			display: block; background: #ffffff; border-radius: 4px;
+			flex: 0 0 auto;
+		}
+		.share-btn {
+			display: flex; align-items: center; justify-content: center;
+			width: 38px; height: 38px; flex: 0 0 auto; padding: 0;
+			cursor: pointer; color: #8be9fd;
+			background-color: rgba(26, 26, 46, 0.9);
+			border: 1px solid rgba(139, 233, 253, 0.35); border-radius: 6px;
+		}
+		.share-btn:hover { background-color: rgba(139, 233, 253, 0.2); color: #ffffff; }
+		.share-btn svg { display: block; }
+	</style>
+</head>
+<body>
+	<div id="status">Loading…</div>
+	<canvas class="game_canvas" id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1" onmousedown="event.target.focus()" onkeydown="event.preventDefault()"></canvas>
+	<a id="about-btn" href="about.html" title="About" aria-label="About this app">?</a>
+	<div id="about-overlay" hidden>
+		<div class="about-panel">
+			<div class="about-head">
+				<span>About</span>
+				<button id="about-close" aria-label="Close about">&times;</button>
+			</div>
+			<iframe class="about-frame" title="About this app"></iframe>
+		</div>
+	</div>
+	<div id="share-overlay" hidden>
+		<div class="share-panel">
+			<button id="share-close" aria-label="Close share">&times;</button>
+			<div id="share-tiles"></div>
+			<div class="share-mid">
+				<canvas id="share-hero" width="460" height="174"></canvas>
+				<canvas id="share-qr"></canvas>
+				<button class="share-btn" id="share-copy-card" title="Copy card" aria-label="Copy card">
+					<svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true"><path fill="currentColor" d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+				</button>
+			</div>
+			<div class="share-sep"></div>
+			<div class="share-urlrow">
+				<div id="share-url"></div>
+				<button class="share-btn" id="share-copy-link" title="Copy link" aria-label="Copy link">
+					<svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true"><path fill="currentColor" d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>
+				</button>
+			</div>
+		</div>
+	</div>
+
+	<script type="text/javascript" src="vendor/qrcode-generator.js"></script>
+	<script type="text/javascript" src="odin.js"></script>
+	<script>
+		(function() {
+			var statusEl = document.getElementById("status");
+			function fail(msg) { statusEl.textContent = msg; }
+
+			var aboutOverlay = document.getElementById("about-overlay");
+			function hideAbout() { aboutOverlay.hidden = true; }
+			document.getElementById("about-btn").addEventListener("click",
+				function(e) {
+					if (e.button !== 0 || e.ctrlKey || e.shiftKey ||
+					    e.altKey || e.metaKey) {return}
+					e.preventDefault();
+					var f = aboutOverlay.querySelector("iframe");
+					if (!f.getAttribute("src")) {
+						f.setAttribute("src", "about.html?embed=1");
+					}
+					aboutOverlay.hidden = false;
+				});
+			document.getElementById("about-close").addEventListener(
+				"click", hideAbout);
+			document.addEventListener("keydown", function(e) {
+				if (e.key === "Escape" && !aboutOverlay.hidden) {hideAbout();}
+			});
+			aboutOverlay.addEventListener("click", function(e) {
+				if (e.target === aboutOverlay) {hideAbout();}
+			});
+
+			(function() {
+				var m = /#car=([A-Za-z0-9_-]+)/.exec(window.location.hash || "");
+				window.__odm_car_payload = m ? m[1] : "";
+				window.__odm_share_open = 0;
+				window.__odm_share_car = -1;
+
+				var overlay = document.getElementById("share-overlay");
+				var heroCv = document.getElementById("share-hero");
+				var tilesEl = document.getElementById("share-tiles");
+				var urlEl = document.getElementById("share-url");
+				var qrCv = document.getElementById("share-qr");
+				var state = null;
+
+				function b64ToCanvas(b64, w, h) {
+					var bin = atob(b64);
+					var buf = new Uint8ClampedArray(w * h * 4);
+					for (var i = 0; i < bin.length; i++) {buf[i] = bin.charCodeAt(i);}
+					var c = document.createElement("canvas");
+					c.width = w; c.height = h;
+					c.getContext("2d").putImageData(new ImageData(buf, w, h), 0, 0);
+					return c;
+				}
+
+				function qrCanvas(url, pxPerModule) {
+					var q = qrcode(0, "L");
+					q.addData(url);
+					q.make();
+					var n = q.getModuleCount(), quiet = 4;
+					var size = (n + quiet * 2) * pxPerModule;
+					qrCv.width = size; qrCv.height = size;
+					var ctx = qrCv.getContext("2d");
+					ctx.imageSmoothingEnabled = false;
+					ctx.fillStyle = "#ffffff";
+					ctx.fillRect(0, 0, size, size);
+					ctx.fillStyle = "#1a1a2e";
+					for (var r = 0; r < n; r++) {
+						for (var col = 0; col < n; col++) {
+							if (q.isDark(r, col)) {
+								ctx.fillRect(
+									(col + quiet) * pxPerModule,
+									(r + quiet) * pxPerModule,
+									pxPerModule, pxPerModule);
+							}
+						}
+					}
+					return q;
+				}
+
+				function showHero(cv) {
+					heroCv.width = cv.width; heroCv.height = cv.height;
+					heroCv.getContext("2d").drawImage(cv, 0, 0);
+				}
+
+				function selectTile(i, post) {
+					state.sel = i;
+					var t = state.tiles[i];
+					urlEl.textContent = t.u;
+					qrCanvas(t.u, 5);
+					var kids = tilesEl.children;
+					for (var k = 0; k < kids.length; k++) {
+						kids[k].className = "share-tile" + (k === i ? " sel" : "");
+					}
+					if (post) {window.__odm_share_car = i;}
+				}
+
+				function buildTiles(tiles) {
+					tilesEl.innerHTML = "";
+					for (var i = 0; i < tiles.length; i++) {
+						var t = tiles[i];
+						var b = document.createElement("button");
+						b.className = "share-tile";
+						b.type = "button";
+						b.title = t.u;
+						var img = b64ToCanvas(t.img, t.w, t.h);
+						var tc = document.createElement("canvas");
+						tc.width = 68; tc.height = 27;
+						var tctx = tc.getContext("2d");
+						tctx.imageSmoothingEnabled = true;
+						tctx.drawImage(img, 0, 0, 68, 27);
+						b.appendChild(tc);
+						if (t.t) {
+							var star = document.createElement("span");
+							star.className = "share-tile-t";
+							star.textContent = "\u2605";
+							b.appendChild(star);
+						}
+						var num = document.createElement("span");
+						num.className = "share-tile-n";
+						num.textContent = String(i + 1);
+						b.appendChild(num);
+						(function(idx) {
+							b.addEventListener("click", function() {
+								selectTile(idx, true);
+							});
+						})(i);
+						tilesEl.appendChild(b);
+					}
+				}
+
+				function scrollSelIntoView() {
+					var tile = tilesEl.children[state.sel];
+					if (!tile) {return;}
+					var cur = tile.getBoundingClientRect().left -
+						tilesEl.getBoundingClientRect().left;
+					var tgt = (tilesEl.clientWidth - tile.offsetWidth) / 2;
+					tilesEl.scrollLeft += cur - tgt;
+				}
+
+				function shareOpen(json) {
+					var data = JSON.parse(json);
+					state = {tiles: data.tiles, sel: data.hero};
+					buildTiles(state.tiles);
+					selectTile(data.hero, false);
+					overlay.hidden = false;
+					window.__odm_share_open = 1;
+					scrollSelIntoView();
+				}
+
+				function shareHero(json) {
+					var data = JSON.parse(json);
+					if (!state || data.i !== state.sel) {return}
+					showHero(b64ToCanvas(data.img, data.w, data.h));
+				}
+
+				function closeShare() {
+					overlay.hidden = true;
+					window.__odm_share_open = 0;
+				}
+
+				document.getElementById("share-close").addEventListener("click", closeShare);
+				overlay.addEventListener("click", function(e) {
+					if (e.target === overlay) {closeShare();}
+				});
+				document.addEventListener("keydown", function(e) {
+					if (e.key === "Escape" && !overlay.hidden) {closeShare();}
+				});
+				window.__odm_js_handlers = [shareOpen, shareHero];
+
+				var COPY_SVG = '<svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true"><path fill="currentColor" d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>';
+				var CHECK_SVG = '<svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true"><path fill="currentColor" d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>';
+				function flash(btn) {
+					btn.innerHTML = CHECK_SVG;
+					setTimeout(function() {btn.innerHTML = COPY_SVG;}, 1200);
+				}
+
+				function cardBlob() {
+					var url = urlEl.textContent;
+					var q = qrcode(0, "L");
+					q.addData(url);
+					q.make();
+					var n = q.getModuleCount(), px = 4, quiet = 4;
+					var size = (n + quiet * 2) * px;
+					var PW = heroCv.width, PH = heroCv.height;
+					var c = document.createElement("canvas");
+					c.width = 40 + PW + 24 + size + 40;
+					c.height = 40 + PH + 40;
+					var W = c.width, H = c.height;
+					var ctx = c.getContext("2d");
+					ctx.fillStyle = "#1a1a2e";
+					ctx.fillRect(0, 0, W, H);
+					ctx.imageSmoothingEnabled = true;
+					ctx.drawImage(heroCv, 40, 40, PW, PH);
+					ctx.fillStyle = "#8a8fa3";
+					ctx.font = "18px 'SF Mono', Consolas, monospace";
+					ctx.fillText("boxcar3d.com", 40, H - 26);
+					var qx = W - 40 - size, qy = Math.round((H - size) / 2);
+					ctx.fillStyle = "#ffffff";
+					ctx.fillRect(qx, qy, size, size);
+					ctx.fillStyle = "#1a1a2e";
+					for (var r = 0; r < n; r++) {
+						for (var col = 0; col < n; col++) {
+							if (q.isDark(r, col)) {
+								ctx.fillRect(
+									qx + (col + quiet) * px,
+									qy + (r + quiet) * px, px, px);
+							}
+						}
+					}
+					return new Promise(function(resolve, reject) {
+						c.toBlob(function(b) {
+							if (b) {resolve(b);} else {reject(new Error("toBlob"));}
+						}, "image/png");
+					});
+				}
+
+				document.getElementById("share-copy-link").addEventListener("click",
+					function() {
+						var btn = this;
+						navigator.clipboard.writeText(urlEl.textContent)
+							.then(function() {flash(btn);})
+							.catch(function() {});
+					});
+
+				document.getElementById("share-copy-card").addEventListener("click",
+					function() {
+						var btn = this;
+						var url = urlEl.textContent;
+						cardBlob().then(function(blob) {
+							var file = new File([blob], "boxcar3d-share.png",
+								{type: "image/png"});
+							if (navigator.share && navigator.canShare &&
+							    navigator.canShare({files: [file]})) {
+								return navigator.share(
+									{files: [file], text: url});
+							}
+							return navigator.clipboard.write([new ClipboardItem({
+								"image/png": file,
+								"text/plain": new Blob([url], {type: "text/plain"}),
+							})]);
+						}).then(function() {flash(btn);}, function() {
+							navigator.clipboard.writeText(url).catch(function() {});
+						});
+					});
+			})();
+
+			(function() {
+				var q = new URLSearchParams(window.location.search);
+				if (q.get("dbglog") !== "1") {return}
+				var pre = document.createElement("pre");
+				pre.style.cssText = "position:fixed;left:0;top:0;z-index:9999;max-width:100%;max-height:60%;" +
+					"overflow:auto;background:rgba(0,0,0,0.88);color:#f88;font:12px monospace;" +
+					"padding:8px;white-space:pre-wrap;display:none";
+				pre.id = "dbglog";
+				document.body.appendChild(pre);
+				var n = 0;
+				function hook(msg) {
+					if (n < 60) {pre.style.display = "block"; n++; pre.textContent += msg + "\n";}
+				}
+				["error", "warn"].forEach(function(lv) {
+					var o = console[lv].bind(console);
+					console[lv] = function() {
+						hook(Array.prototype.map.call(arguments, function(a) {
+							return (typeof a === "object" && a) ? (a.stack || String(a)) : String(a);
+						}).join(" "));
+						o.apply(null, arguments);
+					};
+				});
+				window.addEventListener("error", function(e) {hook("window: " + e.message)});
+				window.addEventListener("unhandledrejection", function(e) {hook("reject: " + (e.reason && e.reason.message || e.reason))});
+			})();
+
+			var q = new URLSearchParams(window.location.search);
+
+			window.__odm_debug_arr = [
+				parseInt(q.get("pause") || "0", 10) | 0,
+				parseInt(q.get("mode") || "0", 10) | 0,
+				parseInt(q.get("gen") || "0", 10) | 0,
+				parseInt(q.get("pack") || "0", 10) | 0,
+				parseInt(q.get("ff") || "0", 10) | 0,
+			];
+
+			function odm_u64(s) {
+				if (!s) {return "0";}
+				try {return BigInt(s).toString(10);} catch (e) {return "0";}
+			}
+			window.__odm_debug_seed_arr = [
+				odm_u64(q.get("seed")),
+				odm_u64(q.get("terrain")),
+			];
+
+			var odinMemoryInterface = new odin.WasmMemoryInterface();
+			odinMemoryInterface.setIntSize(4);
+			var odinImports = odin.setupDefaultImports(odinMemoryInterface);
+
+			function loadVariant(glue, wasm) {
+				window.Module = {
+					instantiateWasm: (imports, successCallback) => {
+						const merged = { ...odinImports, ...imports };
+						return WebAssembly.instantiateStreaming(fetch(wasm), merged)
+							.then(function(output) {
+								var e = output.instance.exports;
+								odinMemoryInterface.setExports(e);
+								odinMemoryInterface.setMemory(e.memory);
+								return successCallback(output.instance);
+							})
+							.catch(function(err) {
+								fail("wasm load failed (" + wasm + "): " + err);
+								throw err;
+							});
+					},
+					onRuntimeInitialized: () => {
+						var e = wasmExports;
+						e._start();
+						e.main_start();
+						statusEl.style.display = "none";
+					},
+					canvas: document.getElementById("canvas")
+				};
+				var s = document.createElement("script");
+				s.src = glue;
+				s.onerror = function() { fail("failed to load " + glue); };
+				document.body.appendChild(s);
+			}
+
+			var forceGl = q.get("gl") === "webgl2";
+			var hasWebGpu = typeof navigator !== "undefined" && !!navigator.gpu;
+			if (forceGl || !hasWebGpu) {
+				loadVariant("index-gles.js", "index-gles.wasm");
+				return;
+			}
+			navigator.gpu.requestAdapter().then(
+				function(adapter) {
+					if (adapter) { loadVariant("index.js", "index.wasm"); }
+					else { loadVariant("index-gles.js", "index-gles.wasm"); }
+				},
+				function() { loadVariant("index-gles.js", "index-gles.wasm"); }
+			);
+		})();
+	</script>
+</body>
+</html>

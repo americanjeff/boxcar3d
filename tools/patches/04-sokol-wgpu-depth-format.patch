@@ -1,0 +1,64 @@
+diff --git a/sokol_app.h b/sokol_app.h
+
+--- a/sokol_app.h
++++ b/sokol_app.h
+@@ -4022,10 +4022,20 @@
+         ds_desc.size.width = (uint32_t)_sapp.framebuffer_width;
+         ds_desc.size.height = (uint32_t)_sapp.framebuffer_height;
+         ds_desc.size.depthOrArrayLayers = 1;
++        // FORK PATCH (wasm/WGPU only): match sokol_gfx.h's patched
++        // _sg_wgpu_textureformat. The on-screen tonemap pass uses this
++        // texture as its depth attachment, so its format must equal the
++        // format the renderer's pipelines declare (SG_PIXELFORMAT_DEPTH ->
++        // depth24plus / DEPTH_STENCIL -> depth24plus-stencil8). The
++        // upstream Depth32Float(-Stencil8) here caused a
++        // "Incompatible depth-stencil attachment format" device error on
++        // the first set_pipeline of every frame. depth24plus is renderable
++        // in base WebGPU and matches the sokol_gfx mapping; native backends
++        // are untouched.
+         if (depth_fmt == SAPP_PIXELFORMAT_DEPTH) {
+-            ds_desc.format = WGPUTextureFormat_Depth32Float;
++            ds_desc.format = WGPUTextureFormat_Depth24Plus;
+         } else {
+-            ds_desc.format = WGPUTextureFormat_Depth32FloatStencil8;
++            ds_desc.format = WGPUTextureFormat_Depth24PlusStencil8;
+         }
+         ds_desc.mipLevelCount = 1;
+         ds_desc.sampleCount = sample_count;
+diff --git a/sokol_gfx.h b/sokol_gfx.h
+
+--- a/sokol_gfx.h
++++ b/sokol_gfx.h
+@@ -17068,8 +17068,30 @@
+         case SG_PIXELFORMAT_RGBA32UI:       return WGPUTextureFormat_RGBA32Uint;
+         case SG_PIXELFORMAT_RGBA32SI:       return WGPUTextureFormat_RGBA32Sint;
+         case SG_PIXELFORMAT_RGBA32F:        return WGPUTextureFormat_RGBA32Float;
+-        case SG_PIXELFORMAT_DEPTH:          return WGPUTextureFormat_Depth32Float;
+-        case SG_PIXELFORMAT_DEPTH_STENCIL:  return WGPUTextureFormat_Depth32FloatStencil8;
++        // ── FORK PATCH (wasm/WGPU only) ─────────────────────────────────
++        // Upstream maps SG_PIXELFORMAT_DEPTH to depth32float, which is a dead
++        // end on WebGPU for this renderer's shadow path:
++        //   1. depth32float is NOT a renderable format in WebGPU (base spec),
++        //      so the shadow-caster / GTAO-prepass depth-only passes that write
++        //      into it are silently dropped as validation errors — the shadow
++        //      map is never populated.
++        //   2. depth32float's texture sample type is "unfilterable-float",
++        //      NOT "depth". The lit shaders use a hardware comparison sampler
++        //      (sampler2DArrayShadow -> WGSL texture_depth_2d_array +
++        //      sample_compare), whose bind-group layout declares sampleType
++        //      "depth". Binding a depth32float view to it is a sample-type
++        //      mismatch; the sampler then reads unbound depth (1.0) => every
++        //      fragment "lit" => no shadows, while the rest of the scene
++        //      renders fine.
++        // depth24plus(-stencil8) fixes both: it is renderable in base WebGPU
++        // (no feature required), multisample-capable, and is the ONLY depth
++        // format that exposes the "depth" (depth-2d-array) sample type with
++        // linear filtering for hardware PCF. The spec notes depth32float's
++        // 1 ULP is never smaller than 1/2^24, so 24-bit depth loses nothing
++        // measurable here. This touches only the WGPU backend; the GL/D3D/Metal
++        // backends (and hence native builds) are untouched and still use D32F.
++        case SG_PIXELFORMAT_DEPTH:          return WGPUTextureFormat_Depth24Plus;
++        case SG_PIXELFORMAT_DEPTH_STENCIL:  return WGPUTextureFormat_Depth24PlusStencil8;
+         case SG_PIXELFORMAT_BC1_RGBA:       return WGPUTextureFormat_BC1RGBAUnorm;
+         case SG_PIXELFORMAT_BC2_RGBA:       return WGPUTextureFormat_BC2RGBAUnorm;
+         case SG_PIXELFORMAT_BC3_RGBA:       return WGPUTextureFormat_BC3RGBAUnorm;

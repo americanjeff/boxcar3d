@@ -1,0 +1,12 @@
+# LSan suppressions for the on-demand leak sweep (tools/leak_sweep.sh).
+#
+# The NVIDIA GL driver allocates a handful of small internal buffers per GL
+# context and does not free them on destroy; running LeakSanitizer in-process
+# with a live GL context (the registry_test opens a sokol_app window) sees
+# these as leaks. They are the driver's own bookkeeping, not ours.
+#
+# Scope is deliberately narrow: only the leak category, and only the NVIDIA
+# driver libs. A leak originating in our code (engine/, tools/, the shims,
+# Box3D) will NOT match these patterns and will still be reported — this file
+# exists to silence the driver's false positives, never to hide our leaks.
+leak:libnvidia-

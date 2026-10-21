@@ -1,0 +1,17 @@
+# Wrapper CMakeLists to build Box3D as a SUBPROJECT for the WASM target.
+#
+# Box3D's top-level CMake enables Emscripten pthreads only when it IS the
+# top-level project (PROJECT_IS_TOP_LEVEL). Pthreads on the web require
+# SharedArrayBuffer, which forces COOP/COEP serving headers — unnecessary for
+# a small demo and a deployment hassle. Building Box3D as a subproject keeps
+# it single-threaded (serial solver path), which also sidesteps the
+# clang-23 `-O3 -msimd128` backend crash (we additionally pass
+# -DBOX3D_DISABLE_SIMD=ON). The resulting libbox3d.a links cleanly into a
+# plain (non-pthread) Emscripten module.
+#
+# This file is generated into the WASM build dir at configure time by
+# tools/build_engine.sh (the @BOX3D_SOURCE@ placeholder is substituted); it is
+# not committed on its own.
+cmake_minimum_required(VERSION 3.22)
+project(box3d_wasm_subproject LANGUAGES C CXX)
+add_subdirectory(@BOX3D_SOURCE@ box3d)
