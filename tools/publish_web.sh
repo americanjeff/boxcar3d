@@ -27,10 +27,12 @@ SRC="$APP_ROOT/build/wasm"
 OUT="$APP_ROOT/build/web"
 
 # The publishable set, in one place: the single web entry (generated from
-# tools/web/index_template.html by build_app.sh) + the Odin JS runtime + the
-# two backend glue/wasm pairs. If the template ever references a new HTML
-# asset, add it here — the reference check below then enforces it ships.
-REQUIRED=(index.html odin.js index.js index.wasm index-gles.js index-gles.wasm vendor/qrcode-generator.js)
+# tools/web/index_template.html by build_app.sh) + the core glue (odm-core.js)
+# + the two backend glue/wasm pairs (index.js loads dynamically per backend,
+# so it is listed here, not caught by the reference check below). If the
+# template ever references a new static HTML asset, add it here — the
+# reference check below then enforces it ships.
+REQUIRED=(index.html odm-core.js index.js index.wasm index-gles.js index-gles.wasm vendor/qrcode-generator.js)
 
 if [ ! -d "$SRC" ]; then
 	echo "Error: $SRC is missing — run 'just build $APP_DIR_NAME wasm' first" >&2

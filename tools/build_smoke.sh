@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Standalone C renderer smoke test: prove the forked Box3D renderer
 # (engine/graphics/renderer/gfx/*.c minus debug_*) + the separately-vendored
-# Sokol (vendor/sokol) + libbox3d (built from vendor/box3d) build and link as
-# one unit on native Linux, WITHOUT Odin or the engine shims. Renders a lit,
-# shadowed cube on a ground slab with the Preetham sky.
+# Sokol (vendor/sokol) + libbox3d (the Odin toolchain's prebuilt) build and
+# link as one unit on native Linux, WITHOUT Odin or the engine shims. Renders
+# a lit, shadowed cube on a ground slab with the Preetham sky.
 #
 # This is the renderer-isolation tool and the native regression guard for the
 # WGPU-guarded fork edits + the sokol patch (all changes are WGPU-guarded or
@@ -22,41 +22,23 @@ BACKEND="${1:-glcore}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-BOX3D="$ROOT/vendor/box3d"
+# libbox3d + its headers come from the Odin toolchain (the same copy the
+# engine's physics package runs on): no local build step.
+ODIN_ROOT="$(odin root)"
+B3ROOT="$ODIN_ROOT/vendor/box3d"
+B3_LIB="$B3ROOT/lib/linux-$(uname -m)/libbox3d.a"
+[ -f "$B3_LIB" ] || B3_LIB="$B3ROOT/lib/linux-amd64/libbox3d.a"
 SOKOL="$ROOT/vendor/sokol"
 FORK="$ROOT/engine/graphics/renderer"
 BUILD="$ROOT/build/native"
 mkdir -p "$BUILD"
 
-echo "── Building libbox3d (native, from pinned tree) ──"
-# Skip the cmake configure/build when libbox3d.a is already present and newer
-# than the Box3D C sources (e.g. build_engine.sh native just built it). cmake
-# --build is incremental anyway, but skipping the configure step keeps this
-# smoke tool fast to re-run.
-B3_LIB="$BOX3D/build_native/src/libbox3d.a"
-need_box3d=1
-if [ -f "$B3_LIB" ]; then
-	need_box3d=0
-	while read -r src; do
-		if [ "$src" -nt "$B3_LIB" ]; then need_box3d=1; break; fi
-	done < <(find "$BOX3D/src" "$BOX3D/include" -name '*.c' -o -name '*.h' 2>/dev/null)
-fi
-if [ "$need_box3d" -eq 1 ]; then
-	cmake -B "$BOX3D/build_native" -S "$BOX3D" \
-		-DBOX3D_SAMPLES=OFF -DBOX3D_UNIT_TESTS=OFF -DBOX3D_BENCHMARKS=OFF \
-		-DBOX3D_DOCS=OFF -DBOX3D_VALIDATE=OFF -DCMAKE_BUILD_TYPE=Release \
-		-DCMAKE_C_FLAGS="-fPIC" -G "Unix Makefiles"
-	cmake --build "$BOX3D/build_native" --config Release -j"$(nproc)"
-else
-	echo "  libbox3d.a up to date — skipping cmake"
-fi
-
 # Include roots:
-#   vendor/box3d/include              box3d/ headers   (box3d/box3d.h)
-#   vendor/sokol                      sokol headers    (sokol_gfx.h)
-#   engine/graphics/renderer          forked renderer  (gfx/renderer.h)
+#   toolchain vendor/box3d/src/include   box3d/ headers   (box3d/box3d.h)
+#   vendor/sokol                         sokol headers    (sokol_gfx.h)
+#   engine/graphics/renderer             forked renderer  (gfx/renderer.h)
 #   engine/graphics/renderer/shaders/generated   committed .glsl.h
-INC=(-I"$BOX3D/include" -I"$SOKOL" -I"$FORK" -I"$FORK/shaders/generated")
+INC=(-I"$B3ROOT/src/include" -I"$SOKOL" -I"$FORK" -I"$FORK/shaders/generated")
 case "$BACKEND" in
 	gles3)
 		SUFFIX="_gles3"
@@ -94,7 +76,7 @@ OBJS+=("$BUILD/smoke_main${SUFFIX}.o")
 
 echo "── Linking smoke_renderer$SUFFIX ──"
 gcc -O2 -o "$BUILD/smoke_renderer$SUFFIX" "${OBJS[@]}" \
-	"$BOX3D/build_native/src/libbox3d.a" "${LIBS[@]}"
+	"$B3_LIB" "${LIBS[@]}"
 
 echo ""
 echo "✓ Smoke build complete: $BUILD/smoke_renderer$SUFFIX"

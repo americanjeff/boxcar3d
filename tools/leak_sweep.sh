@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
 # On-demand leak sweep for a big review / test pass (NOT a per-commit guard).
 #
-# Builds the C engine (Box3D + the shims + the renderer) with
-# AddressSanitizer/LeakSanitizer and runs the native tests under it, so a new
-# C-heap leak (engine, shims, Box3D) or a geometry-registry refcount
-# regression is caught here instead of as a slow OOM deep in a long session.
+# Builds the C engine (Box3D from the toolchain's C sources + the shims + the
+# renderer) with AddressSanitizer/LeakSanitizer and runs the native tests
+# under it, so a new C-heap leak (engine, shims, Box3D) or a
+# geometry-registry refcount regression is caught here instead of as a slow
+# OOM deep in a long session.
 #
 #   ./tools/leak_sweep.sh            # full sweep: physics + registry
 #   ./tools/leak_sweep.sh physics    # just the ASan physics tests (no display)
 #   ./tools/leak_sweep.sh registry   # just the ASan registry test (needs DISPLAY)
 #
 # Covers:
-#   * C-heap leaks — the physics (Box3D + physics_shim) and graphics (renderer
-#     + render_shim) C is built with -fsanitize=address and every test runs
-#     under LeakSanitizer; an allocation we never free is reported at exit.
+#   * C-heap leaks — the physics (Box3D, rebuilt here with ASan from the
+#     toolchain's C sources) and graphics (renderer + render_shim) C is
+#     built with -fsanitize=address and every test runs under LeakSanitizer;
+#     an allocation we never free is reported at exit. (Box3D-internal
+#     allocations are tracked only on the registry path: the odin physics
+#     tests link the toolchain's uninstrumented prebuilt, which wins the
+#     link — see build_physics_leak.)
 #   * Registry refcount leaks — smoke_renderer --registry-test drives the
 #     ref-counted geometry registry through a full lifecycle + a 9-mesh
 #     car-shaped cycle (body + 8 shards, a replace-and-release, teardown); a
@@ -21,23 +26,25 @@
 # Does NOT cover: GPU device memory (LSan only sees the heap) and Odin-side
 # allocations (the Odin runtime owns those; invisible to LSan).
 #
-# The ASan build of Box3D is the slow part (a few minutes); the build is
-# incremental, so a re-run with no engine change is fast.
+# The ASan rebuild of Box3D is the slow part (~1 min); the graphics/shim
+# objects are incremental, so a re-run with no engine change is fast.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-BOX3D="$ROOT/vendor/box3d"
+ODIN_ROOT="$(odin root)"
+B3SRC="$ODIN_ROOT/vendor/box3d/src"
+B3INC="$B3SRC/include"
 SOKOL="$ROOT/vendor/sokol"
 FORK="$ROOT/engine/graphics/renderer"
 ENGLIB="$ROOT/engine/lib"
 BUILD="$ROOT/build/leak"
-B3D_LEAK="$BOX3D/build_leak/src/libbox3dd.a"
+B3D_LEAK="$BUILD/libbox3dd.a"
 SUP="$ROOT/tools/lsan_suppressions.txt"
 mkdir -p "$ENGLIB" "$BUILD"
 
-INC=(-I"$BOX3D/include" -I"$SOKOL" -I"$FORK" -I"$FORK/shaders/generated")
+INC=(-I"$B3INC" -I"$SOKOL" -I"$FORK" -I"$FORK/shaders/generated")
 DEF=(-DSOKOL_GLCORE -DNDEBUG -fsanitize=address -g)
 GL_LIBS=(-lGL -ldl -lm -lpthread -lX11 -lXi -lXcursor)
 # LeakSanitizer is driven via ASAN_OPTIONS=detect_leaks=1; the suppression
@@ -49,24 +56,31 @@ has_display() { [ -n "${DISPLAY:-}" ]; }
 
 # ── Build the ASan engine (incremental) ──────────────────────────────────────
 build_box3d_leak() {
-	echo "── Box3D (ASan) ──"
-	if [ ! -f "$B3D_LEAK" ]; then
-		cmake -B "$BOX3D/build_leak" -S "$BOX3D" \
-			-DBOX3D_SAMPLES=OFF -DBOX3D_UNIT_TESTS=OFF -DBOX3D_BENCHMARKS=OFF \
-			-DBOX3D_DOCS=OFF -DBOX3D_VALIDATE=OFF -DCMAKE_BUILD_TYPE=Debug \
-			-DCMAKE_C_FLAGS="-fPIC -fsanitize=address -g" -G "Unix Makefiles"
-	fi
-	cmake --build "$BOX3D/build_leak" --config Debug -j"$(nproc)"
+	echo "── Box3D (ASan, from the toolchain's C sources) ──"
+	# Compiled directly (no cmake): the toolchain ships only prebuilts, and
+	# the prebuilt is not ASan-instrumented, so a Box3D-internal leak would
+	# be invisible to LSan.
+	local objs=()
+	for src in "$B3SRC"/src/*.c; do
+		gcc -c -O1 -fPIC -g -std=c17 -fsanitize=address -I"$B3INC" \
+			"$src" -o "$BUILD/box3d_leak_$(basename "${src%.c}").o"
+		objs+=("$BUILD/box3d_leak_$(basename "${src%.c}").o")
+	done
+	rm -f "$B3D_LEAK"
+	ar rcs "$B3D_LEAK" "${objs[@]}"
 }
 
 build_physics_leak() {
-	echo "── physics shim + libphysics_leak.a (ASan) ──"
-	gcc -c -O1 -fPIC -g -fsanitize=address -DNDEBUG -I"$BOX3D/include" \
-		"$ROOT/engine/physics/physics_shim.c" -o "$BUILD/physics_shim_leak.o"
-	local combine="$BUILD/phys_combine"
-	rm -rf "$combine"; mkdir -p "$combine"
-	( cd "$combine" && cp "$BUILD/physics_shim_leak.o" . \
-		&& ar x "$B3D_LEAK" && ar rcs "$ENGLIB/libphysics_leak.a" *.o )
+	# Empty, like libphysics_native.a: the odin physics tests link the
+	# toolchain's prebuilt libbox3d.a via `foreign import lib` (the driver
+	# always adds it, and it wins the link over any archive passed via
+	# -extra-linker-flags), so Box3D-internal allocations are outside LSan
+	# on this path — upstream territory, pinned by the toolchain version.
+	# The registry path (smoke_renderer_leak, linked directly with gcc)
+	# still gets the ASan-instrumented Box3D via $B3D_LEAK.
+	echo "── libphysics_leak.a (empty; vendor:box3d supplies b3*) ──"
+	rm -f "$ENGLIB/libphysics_leak.a"
+	ar rcs "$ENGLIB/libphysics_leak.a"
 }
 
 build_graphics_leak() {
@@ -120,7 +134,7 @@ run_registry() {
 
 # ── Dispatch ─────────────────────────────────────────────────────────────────
 case "${1:-full}" in
-	physics)  build_box3d_leak; build_physics_leak; run_physics ;;
+	physics)  build_physics_leak; run_physics ;;
 	registry) build_box3d_leak; build_graphics_leak; build_smoke_leak; run_registry ;;
 	full)     build_box3d_leak; build_physics_leak; build_graphics_leak; build_smoke_leak
 	         run_physics; run_registry ;;

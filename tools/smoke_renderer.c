@@ -1,8 +1,8 @@
 // Standalone C smoke test: prove the forked Box3D renderer
 // (engine/graphics/renderer/gfx/) + the separately-vendored Sokol
-// (vendor/sokol) + libbox3d (vendor/box3d) build and link as one unit on
-// native Linux, WITHOUT Odin or the engine shims, and render a lit,
-// shadowed cube on a ground slab with the Preetham sky.
+// (vendor/sokol) + libbox3d (the Odin toolchain's prebuilt) build and link
+// as one unit on native Linux, WITHOUT Odin or the engine shims, and render
+// a lit, shadowed cube on a ground slab with the Preetham sky.
 //
 // Build:  tools/build_smoke.sh
 // Run:    ./build/native/smoke_renderer

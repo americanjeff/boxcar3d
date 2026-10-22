@@ -25,10 +25,14 @@ just wasm boxcar3d      # browser build
 ```
 
 System requirements live in the root `justfile` header: `odin`, `gcc`,
-`cmake`/`make` + X11/GL headers for native; `emcc` (emsdk) for wasm;
+`cmake`/`make` + X11/GL headers for native; `clang` (wasm32 target) for wasm;
 `sokol-shdc` on PATH for a fresh checkout.
 
 ## Changelog
+
+**0.1.2** - 2026-10-22
+
+- The browser build no longer depends on Emscripten: it compiles with plain clang and the Odin driver, removing the dependency on emsdk.
 
 **0.1.1** - 2026-10-19
 

@@ -1,13 +1,19 @@
 // Generic window/input host only. This shim forwards raw events; the app owns
 // the policy.
 //
-// This TU provides the sokol_app + sokol_glue + sokol_log IMPLEMENTATIONS
-// (with SOKOL_NO_ENTRY so Odin owns the entry), shim_run_app (builds sapp_desc,
-// requests GL 4.5 native / WGPU wasm, window title via -DSHIM_WINDOW_TITLE),
-// and the scalar event dispatch: an internal sapp_event_cb that translates a
-// sapp_event into scalar on_move/on_scroll/on_resize/on_key/on_button/on_touch
-// callbacks (plus the compat-mode synthesized-mouse drop, see
-// ShimDropMouseButtons). The sokol_gfx impl is NOT here — it lives in the forked renderer
+// This TU provides the sokol_glue + sokol_log IMPLEMENTATIONS, shim_run_app
+// (window title via -DSHIM_WINDOW_TITLE), and the scalar event dispatch into
+// the on_move/on_scroll/on_resize/on_key/on_button/on_touch callbacks.
+//
+// Two event-loop worlds share this file (pick by target macro):
+//   - native  (!__wasm__) — sokol_app (SOKOL_GLCORE) owns the loop; the
+//     internal sapp_event_cb translates events to the scalar callbacks.
+//   - bare    (__wasm__)  — the odin driver links the final wasm module and
+//     a hand-rolled JS glue drives the module: it calls the exported
+//     shim_js_* procs (frame/input/resize/wgpu handles) and the shim calls
+//     the JS imports for the debug/interop params. No sokol_app.
+//
+// The sokol_gfx impl is NOT here — it lives in the forked renderer
 // (engine/graphics/renderer/gfx/sokol_impl.c, compiled into libgraphics).
 //
 // Compiled per app by tools/build_app.sh with -DSHIM_WINDOW_TITLE="<title>"
@@ -23,9 +29,12 @@
 #define SHIM_WINDOW_TITLE "odin3d"
 #endif
 
-/* --- sokol impls (app + glue + log; gfx impl is in the forked renderer) --- */
+/* sokol_app only where an event loop exists (native; the bare-wasm JS
+   glue plays the loop role). */
 #define SOKOL_NO_ENTRY /* Odin owns main(); sokol_app exposes sapp_run() instead */
+#if !defined(__wasm__)
 #define SOKOL_APP_IMPL
+#endif
 #define SOKOL_GLUE_IMPL
 #define SOKOL_LOG_IMPL
 
@@ -58,49 +67,34 @@ static ShimKeyCb g_onKey = NULL;
 static ShimButtonCb g_onButton = NULL;
 static ShimTouchCb g_onTouch = NULL;
 
-/* Compat-mode browsers (Chrome/Android) synthesize a mouse event per touch,
-   so drop mouse BUTTON events within SHIM_TOUCH_MOUSE_SUPPRESS_MS of the
-   last touch (emscripten only; native never synthesizes) — otherwise the
-   app's down/up state sees each physical input twice. Time-based, not
-   event-count: an idle page delivers zero events, so a count window would
-   never drain and would swallow the first real click after a touch. Cost:
-   on a hybrid device a real click inside the window is lost (no flag marks
-   the synthesized events). MOVE/SCROLL are never dropped — they keep
-   shim_get_mouse_pos fresh. */
-#ifdef __EMSCRIPTEN__
-#include <emscripten/emscripten.h>
-#define SHIM_TOUCH_MOUSE_SUPPRESS_MS 500.0
-static double g_last_touch_ms = -1e9;
+#if defined(__wasm__)
+/* The bare-wasm JS glue drives the stored frame/cleanup callbacks
+   (shim_js_frame / shim_js_cleanup); the sokol_app world calls them via
+   the desc callbacks instead. */
+static ShimInitCb g_initCb = NULL;
+static ShimFrameCb g_frameCb = NULL;
+static ShimCleanupCb g_cleanupCb = NULL;
 #endif
-
-static int ShimDropMouseButtons(void) {
-#ifdef __EMSCRIPTEN__
-	if (emscripten_get_now() - g_last_touch_ms < SHIM_TOUCH_MOUSE_SUPPRESS_MS) {
-		return 1;
-	}
-#endif
-	return 0;
-}
 
 /* Tracked absolute pointer position (framebuffer pixels, origin top-left).
-   Updated from MOUSE_MOVE events and the first point of each touch event so
-   apps can query it for picking/hover without accumulating deltas (which
-   desyncs on focus/enter/resize); a pure tap produces no MOUSE_MOVE, so the
-   touch update is what makes tap picking work. */
+   Updated from MOUSE_MOVE events (sokol_app worlds) and the first point of
+   each touch event so apps can query it for picking/hover without
+   accumulating deltas (which desyncs on focus/enter/resize); a pure tap
+   produces no MOUSE_MOVE, so the touch update is what makes tap picking
+   work. */
 static float g_mouseX = 0.0f;
 static float g_mouseY = 0.0f;
 
+#if !defined(__wasm__)
 static void ShimEventCb(const sapp_event* ev) {
 	// Add a new event case here only if it is a generic window/input event any
 	// app would plausibly want, forwarded as a scalar callback (see the file
 	// header for the separation rule).
 	switch (ev->type) {
 		case SAPP_EVENTTYPE_MOUSE_DOWN:
-			if (ShimDropMouseButtons()) break;
 			if (g_onButton) g_onButton((int)ev->mouse_button, 1);
 			break;
 		case SAPP_EVENTTYPE_MOUSE_UP:
-			if (ShimDropMouseButtons()) break;
 			if (g_onButton) g_onButton((int)ev->mouse_button, 0);
 			break;
 		case SAPP_EVENTTYPE_MOUSE_MOVE:
@@ -137,11 +131,6 @@ static void ShimEventCb(const sapp_event* ev) {
 				   ident. Track the pointer from the first point so
 				   shim_get_mouse_pos returns the finger position (a pure
 				   tap produces no MOUSE_MOVE; see g_mouseX). */
-#ifdef __EMSCRIPTEN__
-				/* Restart the compat-mode drop window (see
-				   ShimDropMouseButtons). */
-				g_last_touch_ms = emscripten_get_now();
-#endif
 				for (int i = 0; i < ev->num_touches; i++) {
 					const sapp_touchpoint* tp = &ev->touches[i];
 					if (i == 0) {
@@ -156,6 +145,7 @@ static void ShimEventCb(const sapp_event* ev) {
 			break;
 	}
 }
+#endif
 
 static void ShimAppLog(const char* tag, uint32_t logLevel, uint32_t logItemId, const char* message,
                        uint32_t lineNumber, const char* filename, void* userData) {
@@ -169,6 +159,7 @@ static void ShimAppLog(const char* tag, uint32_t logLevel, uint32_t logItemId, c
 	}
 }
 
+#if !defined(__wasm__)
 void shim_run_app(ShimInitCb initCb, ShimFrameCb frameCb, ShimCleanupCb cleanupCb,
                   ShimMoveCb onMove, ShimScrollCb onScroll, ShimResizeCb onResize,
                   ShimKeyCb onKey, ShimButtonCb onButton, ShimTouchCb onTouch) {
@@ -207,6 +198,28 @@ void shim_run_app(ShimInitCb initCb, ShimFrameCb frameCb, ShimCleanupCb cleanupC
 
 	sapp_run(&desc);
 }
+#else
+/* Bare-wasm: the JS glue owns the loop. Registration just stores the
+   callbacks and runs init; the glue then drives shim_js_frame() per rAF
+   tick and shim_js_cleanup() on page teardown. */
+void shim_run_app(ShimInitCb initCb, ShimFrameCb frameCb, ShimCleanupCb cleanupCb,
+                  ShimMoveCb onMove, ShimScrollCb onScroll, ShimResizeCb onResize,
+                  ShimKeyCb onKey, ShimButtonCb onButton, ShimTouchCb onTouch) {
+	g_initCb = initCb;
+	g_frameCb = frameCb;
+	g_cleanupCb = cleanupCb;
+	g_onMove = onMove;
+	g_onScroll = onScroll;
+	g_onResize = onResize;
+	g_onKey = onKey;
+	g_onButton = onButton;
+	g_onTouch = onTouch;
+
+	if (initCb) {
+		initCb();
+	}
+}
+#endif
 
 /* Absolute pointer position in framebuffer pixels (origin top-left, Y down).
    sokol_app has no mouse-position query, so the shim tracks it (see
@@ -216,21 +229,14 @@ void shim_get_mouse_pos(float* x, float* y) {
 	if (y) *y = g_mouseY;
 }
 
-/* Render-debug URL parameters (wasm only): the JS shell
-   (tools/web/index_template.html) parses location.search once at boot and
-   exposes the parsed query params (pause, mode, gen, pack, ff) as
-   window.__odm_debug_arr; this reads one element as a plain scalar so the
-   app side never touches JS. 0 = default; native always returns 0. */
-#ifdef __EMSCRIPTEN__
-#include <emscripten.h>
-EMSCRIPTEN_KEEPALIVE
+#if defined(__wasm__)
+/* JS glue import (see the JS glue for the mapping to URL params). */
+extern int shim_js_get_debug_param(int which);
 int shim_debug_param(int which) {
-	if (which < 0 || which > 4) {
+	if (which < 0 || which > 5) {
 		return 0;
 	}
-	char script[128];
-	snprintf(script, sizeof(script), "(window.__odm_debug_arr || [0,0,0,0,0])[%d] | 0", which);
-	return emscripten_run_script_int(script);
+	return shim_js_get_debug_param(which);
 }
 #else
 int shim_debug_param(int which) {
@@ -239,30 +245,14 @@ int shim_debug_param(int which) {
 }
 #endif
 
-/* u64 render-debug URL parameters (wasm only): the JS shell (see
-   shim_debug_param) exposes [seed, terrainSeed] — ?seed=N and ?terrain=N,
-   as decimal strings — as window.__odm_debug_seed_arr, because a u64 does
-   not fit the 32-bit int channel. This strtoull's one element (base 0:
-   decimal or 0x-hex) so the app side never touches JS. 0 = default;
-   native always returns 0. */
-#ifdef __EMSCRIPTEN__
-#include <emscripten.h>
-EMSCRIPTEN_KEEPALIVE
+#if defined(__wasm__)
+/* JS glue import; the glue parses ?seed=N / ?terrain=N once at boot. */
+extern uint64_t shim_js_get_debug_seed(int which);
 uint64_t shim_debug_seed_param(int which) {
-	uint64_t v = 0;
-	if (which == 0 || which == 1) {
-		char script[160];
-		snprintf(script, sizeof(script),
-			"(window.__odm_debug_seed_arr || ['0','0'])[%d]", which);
-		/* No free: this emscripten's run_script_string returns a static
-		   reused buffer, and the value is consumed before any other call
-		   can overwrite it. */
-		char* val = emscripten_run_script_string(script);
-		if (val) {
-			v = strtoull(val, NULL, 0);
-		}
+	if (which != 0 && which != 1) {
+		return 0;
 	}
-	return v;
+	return shim_js_get_debug_seed(which);
 }
 #else
 uint64_t shim_debug_seed_param(int which) {
@@ -271,22 +261,18 @@ uint64_t shim_debug_seed_param(int which) {
 }
 #endif
 
-/* Shared-car payload (wasm only): the JS shell exposes the page's
-   #car=... URL fragment (window.__odm_car_payload, set by
-   index_template.html from location.hash). Returns the emscripten
-   run_script_string static reused buffer (no free — see
-   shim_debug_seed_param); the app must consume (copy) the bytes before
-   any other call that could overwrite the buffer. "" = no shared car;
-   native always returns "". */
-#ifdef __EMSCRIPTEN__
-#include <emscripten.h>
-EMSCRIPTEN_KEEPALIVE
+/* Shared-car payload: returns a static reused buffer (no free); the app
+   must consume (copy) the bytes before the next shim call can overwrite
+   them. "" = no shared car; native always returns "". */
+#if defined(__wasm__)
+#define SHIM_CAR_BUF_CAP 4096
+static char g_car_buf[SHIM_CAR_BUF_CAP];
+/* JS glue import: copies the #car= payload into buf (NUL-terminated),
+   returns the byte count written (0 = none). */
+extern int shim_js_get_car_payload(char* buf, int cap);
 char* shim_debug_car_param(void) {
-	char* val = emscripten_run_script_string("(window.__odm_car_payload || '')");
-	if (val) {
-		return val;
-	}
-	return "";
+	shim_js_get_car_payload(g_car_buf, SHIM_CAR_BUF_CAP);
+	return g_car_buf;
 }
 #else
 char* shim_debug_car_param(void) {
@@ -295,12 +281,11 @@ char* shim_debug_car_param(void) {
 #endif
 
 /* Share-popup state (wasm only): the JS overlay reports its open/closed
-   state to window.__odm_share_open (0/1). Native always returns 0. */
-#ifdef __EMSCRIPTEN__
-#include <emscripten.h>
-EMSCRIPTEN_KEEPALIVE
+   state (0/1). Native always returns 0. */
+#if defined(__wasm__)
+extern int shim_js_get_share_open(void);
 int shim_debug_share_open(void) {
-	return emscripten_run_script_int("(window.__odm_share_open | 0)");
+	return shim_js_get_share_open();
 }
 #else
 int shim_debug_share_open(void) {
@@ -309,16 +294,12 @@ int shim_debug_share_open(void) {
 #endif
 
 /* Shared-car selector (wasm only): the tile index the user tapped in the
-   share popup (window.__odm_share_car, -1 = none). Read-and-clear: the shim
-   resets the JS value to -1 after reading, so each tap is delivered exactly
-   once. Native always returns -1. */
-#ifdef __EMSCRIPTEN__
-#include <emscripten.h>
-EMSCRIPTEN_KEEPALIVE
+   share popup (-1 = none). Read-and-clear: the glue resets the value after
+   reading, so each tap is delivered exactly once. Native always returns -1. */
+#if defined(__wasm__)
+extern int shim_js_get_share_car(void);
 int shim_debug_share_car(void) {
-	int idx = emscripten_run_script_int("(window.__odm_share_car | 0)");
-	emscripten_run_script("(window.__odm_share_car = -1)");
-	return idx;
+	return shim_js_get_share_car();
 }
 #else
 int shim_debug_share_car(void) {
@@ -326,35 +307,13 @@ int shim_debug_share_car(void) {
 }
 #endif
 
-/* App→JS JSON post (wasm only): deliver a JSON string to a registered JS
-   handler (window.__odm_js_handlers[which]). The bytes are copied through a
-   static HEAP buffer and decoded with TextDecoder — no quote/escape path
-   from the C string to a JS string literal. `len` bytes must fit the buffer
-   (oversized posts are dropped). No-op native. */
-#ifdef __EMSCRIPTEN__
-#include <emscripten.h>
-#define ODM_JS_POST_BUF_CAP (2 * 1024 * 1024)
-static char odm_js_post_buf[ODM_JS_POST_BUF_CAP];
-EMSCRIPTEN_KEEPALIVE
-void shim_js_post(int which, const char* json, int len) {
-	char script[192];
-	if (which < 0 || which > 1 || !json || len <= 0 || len > ODM_JS_POST_BUF_CAP) {
-		return;
-	}
-	memcpy(odm_js_post_buf, json, (size_t)len);
-	/* HEAPU8: the glue's linear-memory view — emscripten_run_script is a
-	   direct eval inside the glue, so its closure-scope vars are visible
-	   to the script (there is no global `heaps` object). */
-	snprintf(script, sizeof(script),
-		"(window.__odm_js_handlers && window.__odm_js_handlers[%d]) && "
-		"window.__odm_js_handlers[%d](new TextDecoder().decode(HEAPU8.subarray("
-		"%lu, %lu + %d)))",
-		which, which,
-		(unsigned long)(uintptr_t)odm_js_post_buf,
-		(unsigned long)(uintptr_t)odm_js_post_buf,
-		(unsigned int)len);
-	emscripten_run_script(script);
-}
+/* App→JS JSON post: deliver a JSON string to a registered JS handler
+   (window.__odm_js_handlers[which]). No-op native. */
+#if defined(__wasm__)
+/* JS glue import: the glue decodes the bytes straight from wasm memory
+   (TextDecoder over a Uint8Array view — no copy through a static buffer,
+   no escape path from the C string to a JS string literal). */
+extern void shim_js_post(int which, const char* json, int len);
 #else
 void shim_js_post(int which, const char* json, int len) {
 	(void)which;
@@ -362,3 +321,136 @@ void shim_js_post(int which, const char* json, int len) {
 	(void)len;
 }
 #endif
+
+/* ── Bare-wasm exports (the JS glue drives the module through these) ──────
+   All are exported by name on the wasm link line (see tools/build_app.sh);
+   the odin side never calls them. */
+#if defined(__wasm__)
+
+/* Canvas size in framebuffer pixels + device pixel ratio. The JS glue
+   pushes them on resize (an initial resize before the first frame, so the
+   app never sees zeros); the renderer C reads them through the sapp_*
+   accessor functions (sokol_app.h declares them; the sokol_app worlds
+   define them, this bare path does). */
+static int g_sapp_width = 0;
+static int g_sapp_height = 0;
+static float g_sapp_dpi_scale = 1.0f;
+
+int sapp_width(void) { return g_sapp_width; }
+int sapp_height(void) { return g_sapp_height; }
+float sapp_dpi_scale(void) { return g_sapp_dpi_scale; }
+
+/* WebGPU handles (wgpu flavor reads them; the GL flavor leaves them 0).
+   The JS glue owns the real objects behind its own handle table (small
+   int indices, so uint32 crosses as a plain JS number — no BigInt) and
+   pushes them in: the device via backend.init() between instantiation
+   and _start (the app's init queries sglue_environment for it), the two
+   swapchain views via shim_js_set_swapchain before every shim_js_frame
+   call (WebGPU gives a fresh canvas texture per frame). */
+static uint32_t g_wgpu_device = 0;
+static uint32_t g_wgpu_render_view = 0;
+static uint32_t g_wgpu_depth_view = 0;
+
+void shim_js_set_wgpu_device(uint32_t device) {
+	g_wgpu_device = device;
+}
+
+void shim_js_set_swapchain(uint32_t render_view, uint32_t depth_view) {
+	g_wgpu_render_view = render_view;
+	g_wgpu_depth_view = depth_view;
+}
+
+
+void shim_js_frame(void) {
+	if (g_frameCb) {
+		g_frameCb();
+	}
+}
+
+void shim_js_cleanup(void) {
+	if (g_cleanupCb) {
+		g_cleanupCb();
+	}
+}
+
+void shim_js_key(int keycode, int pressed) {
+	if (g_onKey) {
+		g_onKey(keycode, pressed);
+	}
+}
+
+void shim_js_button(int button, int pressed) {
+	if (g_onButton) {
+		g_onButton(button, pressed);
+	}
+}
+
+void shim_js_move(float dx, float dy) {
+	if (g_onMove) {
+		g_onMove(dx, dy);
+	}
+}
+
+void shim_js_set_mouse(float x, float y) {
+	g_mouseX = x;
+	g_mouseY = y;
+}
+
+void shim_js_scroll(float dy) {
+	if (g_onScroll) {
+		g_onScroll(dy);
+	}
+}
+
+void shim_js_resize(int w, int h, float dpi) {
+	g_sapp_width = w;
+	g_sapp_height = h;
+	g_sapp_dpi_scale = dpi;
+	if (g_onResize) {
+		g_onResize(w, h);
+	}
+}
+
+void shim_js_touch(int phase, int ident, float x, float y) {
+	/* Pure dispatch; the glue pushes the event's first point through
+	   shim_js_set_mouse so shim_get_mouse_pos returns the finger position
+	   (a pure tap produces no mouse move; see g_mouseX). */
+	if (g_onTouch) {
+		g_onTouch(phase, ident, x, y);
+	}
+}
+
+/* Scratch buffer for GL string returns (glGetString/glGetStringi): the JS
+   glue copies the string here and returns this buffer's address; the
+   renderer treats it like any GL string (read-only, valid until the next
+   string call). Exported as data by name (see tools/build_app.sh). */
+#define SHIM_GL_STRING_CAP 2048
+char shim_gl_scratch[SHIM_GL_STRING_CAP];
+
+/* sokol_glue's two getters (the glue impl in sokol_glue.h calls these
+   instead of sokol_app's on the bare path). */
+sapp_environment sapp_get_environment(void) {
+	sapp_environment env;
+	memset(&env, 0, sizeof(env));
+	env.defaults.color_format = SAPP_PIXELFORMAT_RGBA8;
+	env.defaults.depth_format = SAPP_PIXELFORMAT_DEPTH;
+	env.defaults.sample_count = 1; /* renderer runs MSAA in its own scene target */
+	env.wgpu.device = (const void*)(uintptr_t)g_wgpu_device;
+	return env;
+}
+
+sapp_swapchain sapp_acquire_swapchain(void) {
+	sapp_swapchain sc;
+	memset(&sc, 0, sizeof(sc));
+	sc.invalid = false;
+	sc.width = g_sapp_width;
+	sc.height = g_sapp_height;
+	sc.sample_count = 1;
+	sc.color_format = SAPP_PIXELFORMAT_RGBA8;
+	sc.depth_format = SAPP_PIXELFORMAT_DEPTH;
+	sc.wgpu.render_view = (const void*)(uintptr_t)g_wgpu_render_view;
+	sc.wgpu.depth_stencil_view = (const void*)(uintptr_t)g_wgpu_depth_view;
+	return sc;
+}
+
+#endif /* bare-wasm exports */

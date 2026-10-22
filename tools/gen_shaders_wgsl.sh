@@ -16,19 +16,21 @@
 # the GTAO chain at runtime (see the GLES3 guards in gtao.c / renderer.c),
 # so those desc functions are never called with SG_BACKEND_GLES3.
 #
-# Reads .glsl sources from vendor/box3d/samples/shaders/ (the renderer keeps
-# only the generated headers, in engine/graphics/renderer/shaders/generated/).
+# Reads .glsl sources from engine/graphics/renderer/shaders/src/ (the Box3D
+# sample shaders, kept in-repo — the toolchain's vendor/box3d tree ships no
+# samples/) and writes the generated headers to
+# engine/graphics/renderer/shaders/generated/.
 # sokol-shdc is a generation tool, not a build dependency: the build reads
 # these committed headers directly.
 #
-# Normally invoked by tools/vendor_box3d.sh. Standalone usage:
+# Standalone usage:
 #   ./tools/gen_shaders_wgsl.sh [path/to/sokol-shdc]
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-SHADERS="$ROOT/vendor/box3d/samples/shaders"
+SHADERS="$ROOT/engine/graphics/renderer/shaders/src"
 OUT="$ROOT/engine/graphics/renderer/shaders/generated"
 
 SHDC="${1:-${SOKOL_SHDC:-}}"

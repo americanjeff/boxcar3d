@@ -1288,6 +1288,8 @@ render_pop_viewer :: proc(cam: ^Camera_State) {
 		CAMERA_FAR,
 		pop_viewer.sim_time,
 		view_debug_mode,
+		false,
+		!ao_enabled,
 	)
 }
 
@@ -1457,6 +1459,8 @@ render_scene :: proc(cam: ^Camera_State) {
 		CAMERA_FAR,
 		0.0,
 		view_debug_mode,
+		false,
+		!ao_enabled,
 	)
 }
 

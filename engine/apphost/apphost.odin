@@ -219,9 +219,12 @@ foreign _ {
 }
 
 // Debug_Pause_Frame / Debug_Initial_View / Debug_Stop_Gen /
-// Debug_Initial_Pack / Debug_Background_Evolve — the wasm shell's
-// render-debug URL parameters (?pause=N&mode=M&gen=G&pack=1&ff=1). Read
-// once at app start; 0 = default; native always returns 0.
+// Debug_Initial_Pack / Debug_Background_Evolve / Debug_Initial_AO — the
+// wasm shell's render-debug URL parameters
+// (?pause=N&mode=M&gen=G&pack=1&ff=1&ao=0). Read once at app start; 0 =
+// default; native always returns 0. Debug_Initial_AO returns -1 when the
+// ?ao= param is absent (0/1 when explicit) — AO is on by default and only
+// ?ao=0 turns it off.
 Debug_Pause_Frame :: proc() -> int {
 	return int(debug_param_raw(0))
 }
@@ -240,6 +243,10 @@ Debug_Initial_Pack :: proc() -> int {
 
 Debug_Background_Evolve :: proc() -> int {
 	return int(debug_param_raw(4))
+}
+
+Debug_Initial_AO :: proc() -> int {
+	return int(debug_param_raw(5))
 }
 
 // Debug_Seed / Debug_Terrain_Seed — the wasm shell's seed URL parameters

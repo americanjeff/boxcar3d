@@ -396,6 +396,7 @@ static void Gpu_DrainGlErrors( void ) { }
 #endif
 
 // public API
+
 void InitRenderer( const sg_environment* env )
 {
 	sg_desc desc = { 0 };
@@ -1589,7 +1590,7 @@ static void DrawScene( int targetWidth, int targetHeight, const FrameInput* fram
 	// every lit pipeline. Cleared to 1.0 (no occlusion) whenever the AO
 	// chain is skipped.
 	const sg_view aoView = GetAOResultSampleView();
-	const sg_sampler aoSampler = GetAOLinearSampler();
+	const sg_sampler aoSampler = GetAOSampler();
 
 	// Cubes
 	if ( s_gfx.cubeCount > 0 )
@@ -2482,7 +2483,7 @@ static void DrawTransparentIntoResolve( int width, int height, const FrameInput*
 	b3Vec3 iblSh[9];
 	GetIblSphericalHarmonicCoefficients( iblSh );
 	const sg_view aoView = GetAOResultSampleView();
-	const sg_sampler aoSampler = GetAOLinearSampler();
+	const sg_sampler aoSampler = GetAOSampler();
 
 	ub_frame_t cubeFrame = { 0 };
 	cubeFrame.view = frame->view;
@@ -2849,7 +2850,7 @@ void RenderFrame( const sg_swapchain* swapChain, const FrameInput* frame )
 	// the GTAO linear-depth pre-pass.
 	sg_push_debug_group( "overlays" );
 	OverlaySubmit( swapChain->width, swapChain->height, &frame->view, &frame->viewInv, &frame->proj, &frame->projInv,
-				   frame->cameraPosition, frame->time, GetLinearDepthSampleView(), GetAOLinearSampler(), swapChain->color_format,
+				   frame->cameraPosition, frame->time, GetLinearDepthSampleView(), GetAOSampler(), swapChain->color_format,
 				   swapChain->depth_format );
 	sg_pop_debug_group();
 	// World labels ride the same pass as the overlays, after them so a label
@@ -2929,7 +2930,7 @@ void RenderFrameOffscreen( const sg_attachments* attachments, sg_pixel_format ou
 	// test target is color-only, so depth format is NONE.
 	sg_push_debug_group( "overlays" );
 	OverlaySubmit( width, height, &frame->view, &frame->viewInv, &frame->proj, &frame->projInv, frame->cameraPosition,
-				   frame->time, GetLinearDepthSampleView(), GetAOLinearSampler(), outputFormat, SG_PIXELFORMAT_NONE );
+				   frame->time, GetLinearDepthSampleView(), GetAOSampler(), outputFormat, SG_PIXELFORMAT_NONE );
 	sg_pop_debug_group();
 	sg_push_debug_group( "world_text" );
 	WorldTextSubmit( width, height, &frame->view, &frame->viewInv, &frame->proj, &frame->projInv, frame->cameraPosition,
@@ -3146,6 +3147,7 @@ int GetGpuOutOfMemory( void )
 {
 	return s_gfx.gpuOom ? 1 : 0;
 }
+
 
 void ResetFrameArena( void )
 {

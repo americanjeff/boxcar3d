@@ -24,11 +24,30 @@ APP_ROOT="$ROOT/apps/$APP_DIR_NAME"
 . "$APP_ROOT/project.env"
 [ -n "${APP:-}" ]  || { echo "Error: APP not set in $APP_ROOT/project.env" >&2; exit 1; }
 [ -n "${TITLE:-}" ] || { echo "Error: TITLE not set in $APP_ROOT/project.env" >&2; exit 1; }
-BOX3D="$ROOT/vendor/box3d"
+# Box3D lives in the Odin toolchain (vendor/box3d in the toolchain tree) on
+# both targets: the engine C compiles against its headers, and `odin build`
+# links the toolchain's prebuilt (libbox3d.a native / box3d_wasm.o wasm)
+# from the app object's `foreign import lib`.
+ODIN_ROOT="$(odin root)"
+B3INC="$ODIN_ROOT/vendor/box3d/src/include"
+# The native final link names libbox3d.a directly: the renderer C references
+# b3* symbols even in apps that never import the physics package,
+# so the archive must be on every native link line.
+case "$(uname -s)" in
+	Darwin) B3LIB="$ODIN_ROOT/vendor/box3d/lib/darwin/libbox3d.a" ;;
+	*)      B3LIB="$ODIN_ROOT/vendor/box3d/lib/linux-amd64/libbox3d.a" ;;
+esac
 SOKOL="$ROOT/vendor/sokol"
 FORK="$ROOT/engine/graphics/renderer"
 ENGLIB="$ROOT/engine/lib"
-INC_COMMON=(-I"$BOX3D/include" -I"$SOKOL" -I"$FORK" -I"$FORK/shaders/generated")
+INC_COMMON=(-I"$B3INC" -I"$SOKOL" -I"$FORK" -I"$FORK/shaders/generated")
+# Bare-wasm header roots (mirrors build_engine.sh): libc-shim headers, the
+# cext fills, and the vendored backend API headers (vendor/webgpu-headers,
+# vendor/gles3-headers).
+SHIM_INC="$ODIN_ROOT/vendor/libc-shim/include"
+CXT="$ROOT/engine/cext"
+WGPU_INC="$ROOT/vendor/webgpu-headers"
+GL_INC="$ROOT/vendor/gles3-headers"
 # ML archives are backend-agnostic (pure C, no sokol): one _<target> archive
 # per lib serves both wasm flavors.
 # No colon: an empty-but-set ML_LIBS (from project.env) means "no ML libs";
@@ -56,12 +75,20 @@ compile_apphost() {
 			"$ROOT/engine/apphost/apphost_shim.c" -o "$BUILD/$obj"
 		ar rcs "$ENGLIB/$archive" "$BUILD/$obj"
 	else
-		local port=()
-		[ -z "$suffix" ] && port=(--use-port=emdawnwebgpu)
-		emcc -c -O3 -std=gnu17 "${def[@]}" "${port[@]}" "${INC_COMMON[@]}" \
+		# Bare wasm: libc-shim headers + cext fills. The GLES3
+		# flavor force-includes the GL API header (bare wasm matches none
+		# of sokol's GL platform branches; see build_engine.sh).
+		local hdr=()
+		if [ -n "$suffix" ]; then
+			hdr=(-I"$GL_INC" -include "$GL_INC/GLES3/gl3.h")
+		else
+			hdr=(-I"$WGPU_INC")
+		fi
+		clang --target=wasm32-unknown-unknown -O3 -std=gnu17 -Wno-incompatible-library-redeclaration -c "${def[@]}" \
+			-I"$CXT" -I"$SHIM_INC" "${hdr[@]}" "${INC_COMMON[@]}" \
 			-DSHIM_WINDOW_TITLE="\"$TITLE\"" \
 			"$ROOT/engine/apphost/apphost_shim.c" -o "$BUILD/$obj"
-		emar rcs "$ENGLIB/$archive" "$BUILD/$obj"
+		ar rcs "$ENGLIB/$archive" "$BUILD/$obj"
 	fi
 }
 
@@ -81,98 +108,91 @@ build_native() {
 	odin build "$APP_ROOT/src" -collection:engine="$ROOT/engine" \
 		-out:"$OUT/$APP" -o:speed \
 		-vet -strict-style -vet-tabs -disallow-do -warnings-as-errors \
-		-extra-linker-flags:"$ENGLIB/libphysics_native.a $ENGLIB/libgraphics_native.a $ENGLIB/libapphost_native.a $ML_ARCHS $HOOK_FLAGS -lGL -ldl -lm -lpthread -lX11 -lXi -lXcursor"
+		-extra-linker-flags:"$ENGLIB/libphysics_native.a $ENGLIB/libgraphics_native.a $ENGLIB/libapphost_native.a $B3LIB $ML_ARCHS $HOOK_FLAGS -lGL -ldl -lm -lpthread -lX11 -lXi -lXcursor"
 	echo ""
 	echo "✓ Native build complete: $OUT/$APP"
 	echo "  Run with: ./$OUT/$APP"
 }
 
 build_wasm() {
-	# Locate Emscripten
-	if ! command -v emcc &>/dev/null; then
-		for c in "${EMSDK_HOME:-}" "$HOME/dev/upstream/toolchain/emsdk" "$HOME/dev/clone/emsdk" "$HOME/emsdk" /opt/emsdk; do
-			if [ -n "$c" ] && [ -f "$c/emsdk_env.sh" ]; then source "$c/emsdk_env.sh" >/dev/null 2>&1; break; fi
-		done
-	fi
-	command -v emcc >/dev/null || { echo "Error: emcc not found." >&2; exit 1; }
+	# Bare-wasm build: clang compiles the apphost C, and
+	# `odin build` does the full compile + final wasm-ld link per flavor.
+	# Sokol's backend is a compile-time macro, so the WebGPU (SOKOL_WGPU)
+	# and WebGL2 (SOKOL_GLES3) flavors are separate wasm artifacts sharing
+	# the Odin + physics + ml archives; the single web entry
+	# (tools/web/index_template.html) probes the browser at boot and loads
+	# the matching glue (index.js / index-gles.js) as an external script,
+	# so the URL is stable and a shared link runs the best available
+	# backend on the recipient's machine.
+	command -v clang >/dev/null || { echo "Error: clang not found (need wasm32 target support)." >&2; exit 1; }
 	compile_apphost "" -DSOKOL_WGPU -DNDEBUG
 	compile_apphost "gl" -DSOKOL_GLES3 -DNDEBUG
 	OUT="$APP_ROOT/build/wasm"
 	mkdir -p "$OUT"
-	ODIN_ROOT="$(odin root)"
-	echo "── Building Odin object (js_wasm32) ──"
-	odin build "$APP_ROOT/src" -target:js_wasm32 -build-mode:obj \
-		-collection:engine="$ROOT/engine" \
-		-out:"$OUT/$APP.wasm.obj" -o:speed \
-		-vet -strict-style -vet-tabs -disallow-do -warnings-as-errors
 
-	# One Odin object, two emcc links: sokol's backend is a compile-time
-	# macro, so the WebGPU (SOKOL_WGPU) and WebGL2 (SOKOL_GLES3) flavors
-	# are separate wasm artifacts sharing the Odin + physics + ml archives.
-	# Each link emits a standalone Emscripten glue + wasm pair
-	# (index.js/index.wasm, index-gles.js/index-gles.wasm). The single web
-	# entry (tools/web/index_template.html) probes the browser at boot and
-	# loads the matching glue as an external script, so the URL is stable
-	# and a shared link runs the best available backend on the recipient's
-	# machine.
+	# box3d_wasm.a: the toolchain's prebuilt box3d object as a single-member
+	# archive, so every app's final link can resolve the renderer's b3*
+	# references even when the app's package graph never reaches
+	# vendor:box3d. Physics apps already link the object via the
+	# package, and an archive member is pulled only for still-undefined
+	# symbols, so they are unaffected.
+	B3ARCH="$ENGLIB/libbox3d_wasm.a"
+	ar rcs "$B3ARCH" "$ODIN_ROOT/vendor/box3d/lib/box3d_wasm.o"
+
+	# The C-side export surface the JS glue (tools/web/odm-core.js) drives:
+	# the apphost shim procs (frame/input/resize) + the GL string scratch
+	# buffer (data export). Forwarded to the odin driver's wasm-ld line.
+	# main_start is gone: _start() runs the app's main() (the driver's odin
+	# runtime entry), which reaches shim_run_app.
+	EXPORTS="--export=shim_js_frame --export=shim_js_cleanup --export=shim_js_key --export=shim_js_button --export=shim_js_move --export=shim_js_set_mouse --export=shim_js_scroll --export=shim_js_resize --export=shim_js_touch --export=shim_js_set_wgpu_device --export=shim_js_set_swapchain --export=shim_gl_scratch"
+
+	# Optional per-app build hook (same contract as the native build).
+	HOOK_FLAGS=""
+	if [ -f "$APP_ROOT/build_hook.sh" ]; then
+		HOOK_FLAGS="$(bash "$APP_ROOT/build_hook.sh" wasm "$APP_ROOT" "$ROOT")"
+	fi
+
 	link_wasm_variant() {
 		local variant="$1"
-		local arch_graphics arch_apphost js_out em_extra
+		local gfx apphost out
 		case "$variant" in
 			webgpu)
-				arch_graphics="$ENGLIB/libgraphics_wasm.a"
-				arch_apphost="$ENGLIB/libapphost_wasm.a"
-				js_out="$OUT/index.js"
-				em_extra=(--use-port=emdawnwebgpu)
+				gfx="$ENGLIB/libgraphics_wasm.a"
+				apphost="$ENGLIB/libapphost_wasm.a"
+				out="$OUT/index"
 				;;
 			webgl2)
-				arch_graphics="$ENGLIB/libgraphics_wasmgl.a"
-				arch_apphost="$ENGLIB/libapphost_wasmgl.a"
-				js_out="$OUT/index-gles.js"
-				# sokol's GLES3 backend speaks the WebGL2 ES 3.0 API; no
-				# emdawnwebgpu port (Dawn is the WebGPU-only dependency).
-				em_extra=(-sUSE_WEBGL2=1)
+				gfx="$ENGLIB/libgraphics_wasmgl.a"
+				apphost="$ENGLIB/libapphost_wasmgl.a"
+				out="$OUT/index-gles"
 				;;
 		esac
-		echo "── Linking with emcc ($variant) → $(basename "$js_out") ──"
-		# Emscripten 6.0 EXPORTED_FUNCTIONS are C symbols (leading '_'); Odin's
-		# runtime exports `_start` and our entry is `main_start`.
-		#
-		# `-sWARN_ON_UNDEFINED_SYMBOLS=0` is REQUIRED, not a sloppy relaxation:
-		# the Odin wasm runtime imports `cos`/`sin`/`write`/`rand_bytes`/… from
-		# `odin_env`, which is supplied at instantiation by odin.js (merged with
-		# Emscripten's imports in tools/web/index_template.html's
-		# instantiateWasm). Emscripten's link-time symbol resolution cannot see
-		# those JS-side imports, so they are legitimately "undefined" to the
-		# linker. Do NOT remove this flag without first routing those imports
-		# through a mechanism the linker can see. The native build (tools/test.sh)
-		# links with no such relaxation and is the regression guard for the
-		# C-shim symbol surface.
-		# 2 MiB stack (-sSTACK_SIZE): emscripten's 64 KiB default overflows in
-		# b3CreateHull (deep odin→C call chain in slot_start/init_sim_pose), and
-		# the overflow writes past the stack bottom INTO THE HEAP — silently
-		# corrupting malloc metadata (later OOB trap in malloc) and, with the
-		# renderer live, sokol's WebGPU state (the Waterfox GPU-thread crash).
-		emcc -O3 \
-			"$OUT/$APP.wasm.obj" \
-			"$ENGLIB/libphysics_wasm.a" "$arch_graphics" "$arch_apphost" \
-			$ML_ARCHS \
-			"${em_extra[@]}" \
-			-sALLOW_MEMORY_GROWTH=1 \
-			-sSTACK_SIZE=2097152 \
-			-sEXPORTED_FUNCTIONS=['__start','_main_start'] \
-			-sEXPORTED_RUNTIME_METHODS=['wasmExports'] \
-			-sASSERTIONS=1 \
-			-sWARN_ON_UNDEFINED_SYMBOLS=0 \
-			-o "$js_out"
+		echo "── odin build → $(basename "$out").wasm ($variant) ──"
+		# Box3D (b3*): the renderer C references b3* symbols, so the module
+		# must define them. Apps whose package graph reaches vendor:box3d
+		# (physics) get the toolchain's prebuilt box3d_wasm.o linked by the
+		# odin driver; apps that never import physics need the
+		# same object as an archive on the link line ($B3ARCH) — the
+		# linker pulls its members only if the symbols are still undefined,
+		# so physics apps link it in exactly once either way. The libc-shim
+		# @require (wasm target only, in apphost.odin) resolves the C
+		# objects' libc undefineds in-module.
+		odin build "$APP_ROOT/src" -target:js_wasm32 \
+			-collection:engine="$ROOT/engine" \
+			-out:"$out" -o:speed \
+			-vet -strict-style -vet-tabs -disallow-do -warnings-as-errors \
+			-extra-linker-flags:"$ENGLIB/libphysics_wasm.a $B3ARCH $ENGLIB/libcext_wasm.a $gfx $apphost $ML_ARCHS $HOOK_FLAGS $EXPORTS"
 	}
-	cp "$ODIN_ROOT/core/sys/wasm/js/odin.js" "$OUT/odin.js"
 	link_wasm_variant webgpu
 	link_wasm_variant webgl2
-	rm -f "$OUT/$APP.wasm.obj"
-	# The single web entry: static HTML with no Emscripten shell
-	# substitution — its boot script probes the browser and loads
-	# index.js or index-gles.js (see tools/web/index_template.html).
+
+	# The JS host layer: the shared driver + the two backend tables (static
+	# web-shell content, the same set tools/publish_web.sh stages).
+	cp "$ROOT/tools/web/odm-core.js" "$OUT/odm-core.js"
+	cp "$ROOT/tools/web/glue-webgpu.js" "$OUT/index.js"
+	cp "$ROOT/tools/web/glue-webgl2.js" "$OUT/index-gles.js"
+
+	# The single web entry: static HTML (see tools/web/index_template.html).
 	sed "s#@TITLE@#$TITLE#g; s#@PROJECT@#$APP#g; s#@OG_URL@#${SITE_URL:-}#g; s#@OG_DESCRIPTION@#${OG_DESCRIPTION:-}#g; s#@OG_IMAGE@#${SITE_URL:-}/${OG_IMAGE:-}#g" \
 		"$ROOT/tools/web/index_template.html" > "$OUT/index.html"
 	# Apps without a published site (no SITE_URL) ship no og: tags at all —
@@ -199,12 +219,11 @@ build_wasm() {
 	fi
 	[ -f "$OUT/about.html" ] || cp -f "$ROOT/tools/web/about_default.html" "$OUT/about.html"
 
-	# Regression guard for the export-name contract: the web shell
-	# (tools/web/index_template.html) boots Odin by calling
-	# wasmExports._start() then wasmExports.main_start(), so the linked wasm
-	# MUST export exactly those two symbols. A future Emscripten or Odin
-	# runtime change that renames/drops them would otherwise produce a blank
-	# canvas; fail the build here instead.
+	# Regression guard for the export-name contract: the web shell boots
+	# the module by calling _start() and then driving the exported
+	# shim_js_* procs, so the linked wasm MUST export those symbols. A
+	# future Odin runtime change that renames/drops them would otherwise
+	# produce a blank canvas; fail the build here instead.
 	verify_wasm_exports() {
 		local wasm="$1"
 		[ -f "$wasm" ] || { echo "Error: $wasm not produced" >&2; exit 1; }
@@ -214,8 +233,16 @@ build_wasm() {
 			echo "  warn: llvm-nm/wasm-objdump not found; skipping export check" >&2
 			return
 		fi
+		# Only the boot-critical FUNCTION exports are required: the web shell
+		# boots by calling _start() then driving the shim_js_* procs, so a
+		# future rename/drop of those breaks the canvas. (The GL string
+		# scratch, shim_gl_scratch, is a data symbol - the odin driver's
+		# --export does not emit a wasm data export for it, and its absence
+		# is non-fatal: sokol's glGetStringi extension query degrades
+		# gracefully - so it is intentionally not guarded here.)
+		local syms="_start shim_js_frame shim_js_resize"
 		missing=0
-		for sym in _start main_start; do
+		for sym in $syms; do
 			if ! "$nm" --defined-only --extern-only "$wasm" 2>/dev/null | grep -qw "$sym"; then
 				echo "Error: $wasm does not export '$sym' (web shell boot depends on it)" >&2
 				missing=1

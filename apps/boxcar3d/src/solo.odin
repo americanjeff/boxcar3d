@@ -468,6 +468,8 @@ render_solo :: proc(cam: ^Camera_State) {
 		CAMERA_FAR,
 		solo.sim_time,
 		view_debug_mode,
+		false,
+		!ao_enabled,
 	)
 }
 

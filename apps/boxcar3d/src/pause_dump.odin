@@ -1,8 +1,9 @@
 #+build wasm32
 // Pause-time diagnostic dump to the browser console: on the rising edge of
 // sim_paused (the UI pause button or SPACE), print the car on screen - raw
-// genome, decoded geometry, live sim state. Emscripten routes write() to
-// console.log, so the single fmt.println lands in the devtools console.
+// genome, decoded geometry, live sim state. The runtime's write reaches
+// odin_env.write, which the JS glue routes to console.log, so the single
+// fmt.println lands in the devtools console.
 //
 // Read-only by contract: it never touches a world (the hull check builds +
 // destroys scratch hulls) and allocates only on the frame's context.

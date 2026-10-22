@@ -90,6 +90,11 @@ gen_base := 0
 // a different set of cars. Default = serial solo (1).
 view_mode := 1
 
+// Ambient occlusion on, set by the ?ao=0 boot parameter (default on).
+// Render passes `disable_ao: !ao_enabled` to the frame; off = white AO
+// everywhere (the GLES3 look).
+ao_enabled := true
+
 // Fast-forward toggle (the "evolve in background" control): OFF = in-sync
 // (the session runs at most one generation ahead of the displayed pack,
 // pausing while a snapshot is buffered); ON = the session runs freely and

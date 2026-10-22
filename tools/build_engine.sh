@@ -1,8 +1,21 @@
 #!/usr/bin/env bash
 # Stage 1 — build the shared engine C into engine/lib/*_<target>.a.
 #
-# Per target, compiles the vendored Box3D + each project's C shims into
-# generic archives that every app links. ENGINE C CHANGES → re-run this once
+# Per target, compiles the engine C (renderer + render-FFI shim, ML vendors)
+# into generic archives that every app links. Box3D comes from the Odin
+# toolchain (vendor:box3d) on BOTH targets: the app object's
+# `foreign import lib` makes `odin build` link the toolchain's prebuilt
+# (libbox3d.a native, box3d_wasm.o wasm) — no Box3D source compile here.
+#
+# The wasm target links through the odin driver (the final wasm-ld
+# link): the C compiles with bare clang --target=wasm32-unknown-unknown
+# against the toolchain's libc-shim headers, and libc gaps the shim's
+# headers lack (tanf/calloc/fputs/syslog/...) are filled by the wasm-only
+# engine/cext/ objects in libcext_wasm.a (native never links them).
+# -Wno-incompatible-library-redeclaration: the shim's fopen prototype
+# (non-const mode) disagrees with clang 23's builtin; suppressed here,
+# fixed upstream in the toolchain.
+# ENGINE C CHANGES → re-run this once
 # (per target); every app picks up the new archives.
 #
 #   build_engine.sh native   → libphysics_native.a + libgraphics_native.a
@@ -25,7 +38,11 @@ TARGET="${1:?usage: build_engine.sh <native|wasm>}"
 # No colon: an empty-but-set ML_LIBS (from the app's project.env) means "no
 # ML libs"; the default applies only when the variable is unset.
 ML_LIBS="${ML_LIBS-kann cmaes neat}"
-BOX3D="$ROOT/vendor/box3d"
+# Box3D lives in the Odin toolchain (vendor/box3d in the toolchain tree);
+# the C sources + headers used for the wasm compile and the engine C:
+ODIN_ROOT="$(odin root)"
+B3SRC="$ODIN_ROOT/vendor/box3d/src"
+B3INC="$B3SRC/include"
 SOKOL="$ROOT/vendor/sokol"
 FORK="$ROOT/engine/graphics/renderer"
 KANN="$ROOT/vendor/kann"
@@ -45,52 +62,39 @@ if ! ls "$GEN_DIR"/*.glsl.h >/dev/null 2>&1; then
 		"$ROOT/tools/gen_shaders_wgsl.sh" "$SHDC"
 	else
 		echo "Error: $GEN_DIR/*.glsl.h missing and sokol-shdc not found." >&2
-		echo "  Install sokol-shdc (see tools/gen_shaders_wgsl.sh) or run" >&2
-		echo "  ./tools/vendor_box3d.sh, then re-run this script." >&2
+		echo "  Install sokol-shdc (see tools/gen_shaders_wgsl.sh), then" >&2
+		echo "  re-run this script." >&2
 		exit 1
 	fi
 fi
 
-# Locate Emscripten (emcmake/emcc/emar) for the wasm target, sourcing the
-# emsdk env if the tools aren't already on PATH (mirrors build_app.sh).
-ensure_emcc() {
-	if command -v emcc &>/dev/null && command -v emcmake &>/dev/null; then return; fi
-	for c in "${EMSDK_HOME:-}" "$HOME/dev/upstream/toolchain/emsdk" "$HOME/dev/clone/emsdk" "$HOME/emsdk" /opt/emsdk; do
-		if [ -n "$c" ] && [ -f "$c/emsdk_env.sh" ]; then
-			# shellcheck disable=SC1091
-			source "$c/emsdk_env.sh" >/dev/null 2>&1
-			break
-		fi
-	done
-	command -v emcc >/dev/null    || { echo "Error: emcc not found (install Emscripten or set EMSDK_HOME)." >&2; exit 1; }
-	command -v emcmake >/dev/null || { echo "Error: emcmake not found (install Emscripten or set EMSDK_HOME)." >&2; exit 1; }
+# Bare-wasm toolchain bits: clang with a wasm32 target (any LLVM clang
+# 16+) and the header roots the C needs (the backend API headers are
+# vendored: vendor/webgpu-headers, vendor/gles3-headers).
+SHIM_INC="$ODIN_ROOT/vendor/libc-shim/include"
+WGPU_INC="$ROOT/vendor/webgpu-headers"
+GL_INC="$ROOT/vendor/gles3-headers"
+CXT="$ROOT/engine/cext"
+
+ensure_wasm_clang() {
+	command -v clang >/dev/null || { echo "Error: clang not found (need clang with wasm32 target support)." >&2; exit 1; }
+	[ -d "$SHIM_INC" ] || { echo "Error: libc-shim headers missing at $SHIM_INC (broken toolchain install?)." >&2; exit 1; }
+	[ -f "$WGPU_INC/webgpu/webgpu.h" ] || { echo "Error: webgpu.h missing at $WGPU_INC/webgpu/webgpu.h (missing vendor dir?)." >&2; exit 1; }
+	[ -f "$GL_INC/GLES3/gl3.h" ] || { echo "Error: GLES3/gl3.h missing at $GL_INC (missing vendor dir?)." >&2; exit 1; }
 }
 
 # Common include roots (the forked renderer keeps the upstream "gfx/..."
 # include convention; shaders are committed with both glsl430 + wgsl branches).
-INC_COMMON=(-I"$BOX3D/include" -I"$SOKOL" -I"$FORK" -I"$FORK/shaders/generated")
-
-build_box3d_native() {
-	echo "── Building Box3D physics (native) ──"
-	cmake -B "$BOX3D/build_native" -S "$BOX3D" \
-		-DBOX3D_SAMPLES=OFF -DBOX3D_UNIT_TESTS=OFF -DBOX3D_BENCHMARKS=OFF \
-		-DBOX3D_DOCS=OFF -DBOX3D_VALIDATE=OFF -DCMAKE_BUILD_TYPE=Release \
-		-DCMAKE_C_FLAGS="-fPIC" -G "Unix Makefiles"
-	cmake --build "$BOX3D/build_native" --config Release -j"$(nproc)"
-}
+INC_COMMON=(-I"$B3INC" -I"$SOKOL" -I"$FORK" -I"$FORK/shaders/generated")
 
 build_physics_native() {
-	echo "── Compiling physics shim + combining into libphysics_native.a ──"
-	BUILD="$ROOT/build/native"
-	mkdir -p "$BUILD"
-	gcc -c -O2 -fPIC -DNDEBUG -I"$BOX3D/include" \
-		"$ROOT/engine/physics/physics_shim.c" -o "$BUILD/physics_shim.o"
-	COMBINE="$BUILD/phys_combine"
-	rm -rf "$COMBINE"; mkdir -p "$COMBINE"
-	( cd "$COMBINE" && cp ../physics_shim.o . \
-		&& ar x "$BOX3D/build_native/src/libbox3d.a" \
-		&& ar rcs "$ROOT/engine/lib/libphysics_native.a" *.o )
-	rm -rf "$COMBINE"
+	# libphysics_native.a is empty by design: the sim runs on the
+	# toolchain's Box3D (vendor:box3d), which `odin build` links from the
+	# app object's `foreign import lib` input (the toolchain's prebuilt
+	# libbox3d.a). The empty archive keeps every app's link line uniform.
+	echo "── libphysics_native.a (empty; vendor:box3d supplies b3*) ──"
+	rm -f "$ENGLIB/libphysics_native.a"
+	ar rcs "$ENGLIB/libphysics_native.a"
 }
 
 build_graphics_native() {
@@ -157,48 +161,54 @@ build_ml_native() {
 	fi
 }
 
-build_box3d_wasm() {
-	echo "── Building Box3D physics (wasm, single-threaded, no SIMD) ──"
-	# Build Box3D as a SUBPROJECT (PROJECT_IS_TOP_LEVEL=false) so its CMake
-	# does not auto-enable Emscripten pthreads (which would force
-	# SharedArrayBuffer / COOP-COEP serving). -DBOX3D_DISABLE_SIMD=ON avoids a
-	# clang `-O3 -msimd128` backend crash on src/shape.c.
-	BUILD="$ROOT/build/wasm"
-	B3_BUILD="$BOX3D/build_wasm"
-	mkdir -p "$BUILD" "$B3_BUILD"
-	WRAPPER="$BUILD/wasm_box3d_wrapper"
-	mkdir -p "$WRAPPER"
-	sed "s#@BOX3D_SOURCE@#$BOX3D#" "$ROOT/tools/wasm_box3d_wrapper.cmake.in" > "$WRAPPER/CMakeLists.txt"
-	emcmake cmake -B "$B3_BUILD" -S "$WRAPPER" \
-		-DBOX3D_DISABLE_SIMD=ON -DCMAKE_BUILD_TYPE=Release -G "Unix Makefiles"
-	cmake --build "$B3_BUILD" --config Release -j"$(nproc)"
+build_physics_wasm() {
+	# libphysics_wasm.a is empty by design (mirrors native): the sim runs
+	# on the toolchain's Box3D (vendor:box3d), whose prebuilt
+	# box3d_wasm.o the `odin build` driver links from the app object's
+	# `foreign import lib`. The empty archive keeps every app's link line
+	# uniform.
+	echo "── libphysics_wasm.a (empty; vendor:box3d prebuilt supplies b3*) ──"
+	rm -f "$ENGLIB/libphysics_wasm.a"
+	ar rcs "$ENGLIB/libphysics_wasm.a"
 }
 
-build_physics_wasm() {
-	echo "── Compiling physics shim (wasm) → libphysics_wasm.a ──"
+build_cext_wasm() {
+	# engine/cext/: declarations + definitions the toolchain's libc-shim
+	# headers lack (math tanf/expf/round/roundf, stdlib calloc, stdio
+	# fputs, syslog stub). wasm-only by construction (clang --target
+	# wasm32); native builds never link this archive.
+	echo "── Compiling engine/cext → libcext_wasm.a ──"
 	BUILD="$ROOT/build/wasm"; mkdir -p "$BUILD"
-	emcc -c -O3 -DNDEBUG -I"$BOX3D/include" "$ROOT/engine/physics/physics_shim.c" -o "$BUILD/physics_shim.o"
-	rm -f "$ENGLIB/libphysics_wasm.a"
-	cp "$BOX3D/build_wasm/box3d/src/libbox3d.a" "$ENGLIB/libphysics_wasm.a"
-	emar rcs "$ENGLIB/libphysics_wasm.a" "$BUILD/physics_shim.o"
+	local objs=()
+	for src in "$CXT"/*.c; do
+		base=$(basename "$src" .c)
+		clang --target=wasm32-unknown-unknown -O3 -std=gnu17 -Wno-incompatible-library-redeclaration -DNDEBUG \
+			-I"$CXT" -I"$SHIM_INC" -c "$src" -o "$BUILD/cext_${base}.o"
+		objs+=("$BUILD/cext_${base}.o")
+	done
+	ar rcs "$ENGLIB/libcext_wasm.a" "${objs[@]}"
 }
 
 build_graphics_wasm() {
-	echo "── Compiling renderer + render_shim (wasm, SOKOL_WGPU) → libgraphics_wasm.a ──"
+	echo "── Compiling renderer + render_shim (bare wasm, SOKOL_WGPU) → libgraphics_wasm.a ──"
 	BUILD="$ROOT/build/wasm"; mkdir -p "$BUILD"
 	DEF=(-DSOKOL_WGPU -DNDEBUG)
-	# --use-port=emdawnwebgpu adds webgpu/webgpu.h at compile time + Dawn at link.
-	PORT=(--use-port=emdawnwebgpu)
+	# webgpu.h (the WebGPU C API) is vendored — headers only; the wgpu*
+	# calls become module imports the JS glue implements.
+	PORT=(-I"$WGPU_INC")
 	GFX_OBJS=()
 	for src in "$FORK"/gfx/*.c; do
 		base=$(basename "$src" .c)
-		emcc -c -O3 -std=gnu17 "${DEF[@]}" "${PORT[@]}" "${INC_COMMON[@]}" "$src" -o "$BUILD/gfx_${base}.o"
+		clang --target=wasm32-unknown-unknown -O3 -std=gnu17 -Wno-incompatible-library-redeclaration -c "${DEF[@]}" \
+			"${PORT[@]}" -I"$CXT" -I"$SHIM_INC" "${INC_COMMON[@]}" \
+			"$src" -o "$BUILD/gfx_${base}.o"
 		GFX_OBJS+=("$BUILD/gfx_${base}.o")
 	done
-	emcc -c -O3 -std=gnu17 "${DEF[@]}" "${PORT[@]}" "${INC_COMMON[@]}" \
+	clang --target=wasm32-unknown-unknown -O3 -std=gnu17 -Wno-incompatible-library-redeclaration -c "${DEF[@]}" \
+		"${PORT[@]}" -I"$CXT" -I"$SHIM_INC" "${INC_COMMON[@]}" \
 		"$ROOT/engine/graphics/render_shim.c" -o "$BUILD/render_shim.o"
 	GFX_OBJS+=("$BUILD/render_shim.o")
-	emar rcs "$ENGLIB/libgraphics_wasm.a" "${GFX_OBJS[@]}"
+	ar rcs "$ENGLIB/libgraphics_wasm.a" "${GFX_OBJS[@]}"
 }
 
 # WebGL2 fallback variant of the same renderer: identical sources,
@@ -208,59 +218,69 @@ build_graphics_wasm() {
 # compute chain (see the guards in gtao.c / renderer.c) and swaps its R32F
 # targets for WebGL2-core-renderable formats.
 build_graphics_wasm_gl() {
-	echo "── Compiling renderer + render_shim (wasm, SOKOL_GLES3) → libgraphics_wasmgl.a ──"
+	echo "── Compiling renderer + render_shim (bare wasm, SOKOL_GLES3) → libgraphics_wasmgl.a ──"
 	BUILD="$ROOT/build/wasm"; mkdir -p "$BUILD"
 	DEF=(-DSOKOL_GLES3 -DNDEBUG)
+	# The wasm target matches none of sokol_gfx's GL platform branches, so
+	# it includes no GL header; force the GLES3 API header in (the vendored
+	# Khronos copy) to provide the GL types the GLES3 backend uses.
+	GL=(-I"$GL_INC" -include "$GL_INC/GLES3/gl3.h")
 	GFX_OBJS=()
 	for src in "$FORK"/gfx/*.c; do
 		base=$(basename "$src" .c)
-		emcc -c -O3 -std=gnu17 "${DEF[@]}" "${INC_COMMON[@]}" "$src" \
-			-o "$BUILD/gfxgl_${base}.o"
+		clang --target=wasm32-unknown-unknown -O3 -std=gnu17 -Wno-incompatible-library-redeclaration -c "${DEF[@]}" \
+			-I"$CXT" -I"$SHIM_INC" "${GL[@]}" "${INC_COMMON[@]}" \
+			"$src" -o "$BUILD/gfxgl_${base}.o"
 		GFX_OBJS+=("$BUILD/gfxgl_${base}.o")
 	done
-	emcc -c -O3 -std=gnu17 "${DEF[@]}" "${INC_COMMON[@]}" \
+	clang --target=wasm32-unknown-unknown -O3 -std=gnu17 -Wno-incompatible-library-redeclaration -c "${DEF[@]}" \
+		-I"$CXT" -I"$SHIM_INC" "${GL[@]}" "${INC_COMMON[@]}" \
 		"$ROOT/engine/graphics/render_shim.c" -o "$BUILD/render_shim_gl.o"
 	GFX_OBJS+=("$BUILD/render_shim_gl.o")
-	emar rcs "$ENGLIB/libgraphics_wasmgl.a" "${GFX_OBJS[@]}"
+	ar rcs "$ENGLIB/libgraphics_wasmgl.a" "${GFX_OBJS[@]}"
 }
 
 build_ml_wasm() {
 	[ -n "$ML_LIBS" ] || return 0
-	echo "── Compiling ML shims + vendors (wasm) → lib{${ML_LIBS// /,}}_wasm.a ──"
+	echo "── Compiling ML shims + vendors (bare wasm) → lib{${ML_LIBS// /,}}_wasm.a ──"
 	BUILD="$ROOT/build/wasm"; mkdir -p "$BUILD"
+	# ML vendors are pure C (no sokol): shim headers + cext cover their
+	# libc surface (they exercise the same math/stdlib as the renderer);
+	# the prelude force-include gives the old-style vendors (implicit
+	# declarations) a complete standard header surface.
+	WC=(-I"$CXT" -I"$SHIM_INC" -include "$CXT/cext_prelude.h")
 	if want_lib kann; then
 		# KANN → libkann_wasm.a
-		emcc -c -O3 -std=gnu17 -I"$KANN" "$KANN/kann.c" \
-			-o "$BUILD/ml_kann.o"
-		emcc -c -O3 -std=gnu17 -I"$KANN" "$KANN/kautodiff.c" \
-			-o "$BUILD/ml_kautodiff.o"
-		emcc -c -O3 -std=gnu17 -I"$KANN" \
-			"$ML/kann/kann_shim.c" -o "$BUILD/ml_kann_shim.o"
-		emar rcs "$ENGLIB/libkann_wasm.a" "$BUILD/ml_kann.o" "$BUILD/ml_kautodiff.o" "$BUILD/ml_kann_shim.o"
+		clang --target=wasm32-unknown-unknown -O3 -std=gnu17 -Wno-incompatible-library-redeclaration -DNDEBUG -I"$KANN" "${WC[@]}" \
+			-c "$KANN/kann.c" -o "$BUILD/ml_kann.o"
+		clang --target=wasm32-unknown-unknown -O3 -std=gnu17 -Wno-incompatible-library-redeclaration -DNDEBUG -I"$KANN" "${WC[@]}" \
+			-c "$KANN/kautodiff.c" -o "$BUILD/ml_kautodiff.o"
+		clang --target=wasm32-unknown-unknown -O3 -std=gnu17 -Wno-incompatible-library-redeclaration -DNDEBUG -I"$KANN" "${WC[@]}" \
+			-c "$ML/kann/kann_shim.c" -o "$BUILD/ml_kann_shim.o"
+		ar rcs "$ENGLIB/libkann_wasm.a" "$BUILD/ml_kann.o" "$BUILD/ml_kautodiff.o" "$BUILD/ml_kann_shim.o"
 	fi
 	if want_lib cmaes; then
 		# c-cmaes → libcmaes_wasm.a
-		emcc -c -O3 -std=gnu17 -I"$CMAES" "$CMAES/cmaes.c" \
-			-o "$BUILD/ml_cmaes.o"
-		emcc -c -O3 -std=gnu17 -I"$CMAES" "$CMAES/boundary_transformation.c" \
-			-o "$BUILD/ml_boundary_transformation.o"
-		emcc -c -O3 -std=gnu17 -I"$KANN" -I"$CMAES" \
-			"$ML/cmaes/cmaes_shim.c" -o "$BUILD/ml_cmaes_shim.o"
-		emar rcs "$ENGLIB/libcmaes_wasm.a" "$BUILD/ml_cmaes.o" "$BUILD/ml_boundary_transformation.o" "$BUILD/ml_cmaes_shim.o"
+		clang --target=wasm32-unknown-unknown -O3 -std=gnu17 -Wno-incompatible-library-redeclaration -DNDEBUG -I"$CMAES" "${WC[@]}" \
+			-c "$CMAES/cmaes.c" -o "$BUILD/ml_cmaes.o"
+		clang --target=wasm32-unknown-unknown -O3 -std=gnu17 -Wno-incompatible-library-redeclaration -DNDEBUG -I"$CMAES" "${WC[@]}" \
+			-c "$CMAES/boundary_transformation.c" -o "$BUILD/ml_boundary_transformation.o"
+		clang --target=wasm32-unknown-unknown -O3 -std=gnu17 -Wno-incompatible-library-redeclaration -DNDEBUG -I"$KANN" -I"$CMAES" "${WC[@]}" \
+			-c "$ML/cmaes/cmaes_shim.c" -o "$BUILD/ml_cmaes_shim.o"
+		ar rcs "$ENGLIB/libcmaes_wasm.a" "$BUILD/ml_cmaes.o" "$BUILD/ml_boundary_transformation.o" "$BUILD/ml_cmaes_shim.o"
 	fi
 	if want_lib neat; then
 		# NEAT → libneat_wasm.a
-		emcc -c -O3 -std=gnu17 -I"$NEAT" "$NEAT/neat.c" \
-			-o "$BUILD/ml_neat.o"
-		emcc -c -O3 -std=gnu17 -I"$NEAT" \
-			"$ML/neat/neat_shim.c" -o "$BUILD/ml_neat_shim.o"
-		emar rcs "$ENGLIB/libneat_wasm.a" "$BUILD/ml_neat.o" "$BUILD/ml_neat_shim.o"
+		clang --target=wasm32-unknown-unknown -O3 -std=gnu17 -Wno-incompatible-library-redeclaration -DNDEBUG -I"$NEAT" "${WC[@]}" \
+			-c "$NEAT/neat.c" -o "$BUILD/ml_neat.o"
+		clang --target=wasm32-unknown-unknown -O3 -std=gnu17 -Wno-incompatible-library-redeclaration -DNDEBUG -I"$NEAT" "${WC[@]}" \
+			-c "$ML/neat/neat_shim.c" -o "$BUILD/ml_neat_shim.o"
+		ar rcs "$ENGLIB/libneat_wasm.a" "$BUILD/ml_neat.o" "$BUILD/ml_neat_shim.o"
 	fi
 }
 
 case "$TARGET" in
 	native)
-		build_box3d_native
 		build_physics_native
 		build_graphics_native
 		build_ml_native
@@ -271,9 +291,9 @@ case "$TARGET" in
 		echo "  Next: ./tools/build_app.sh native <app>"
 		;;
 	wasm)
-		ensure_emcc
-		build_box3d_wasm
+		ensure_wasm_clang
 		build_physics_wasm
+		build_cext_wasm
 		build_graphics_wasm
 		build_graphics_wasm_gl
 		build_ml_wasm

@@ -4,8 +4,8 @@
 // the 3D scene, legible via a dark 1 px contrast outline (the SDF shader's
 // distance band, see SHADOW_COL).
 // Top row: the FF helix toggle + generation, PLAY/PAUSE, SKIP, RESEED, the
-// pack toggle, SPEED (cycling), and at the end the trophy + the
-// evolution-scoped best. The first and last are related pairs, each joined
+// pack toggle, SPEED (cycling), and at the end the trophy +
+// the evolution-scoped best. The first and last are related pairs, each joined
 // by a tight 6 px gap; BTN_GAP separates the items. The helix toggle and
 // the car portraits share one left edge (the body's x).
 // Below that: one row per car, sorted by score (live-first on ties,
@@ -370,8 +370,8 @@ build_ui :: proc(hud: ^Hud_Data) {
 	gen_tw := ui_ctx.text_width(ui_ctx.style.font, gen_num)
 	best_tw := ui_ctx.text_width(ui_ctx.style.font, best_num)
 	// Row 0: play/skip/die/trophy/share are always present; the FF helix +
-	// generation and the pack toggle + speed are normal-mode only (see the
-	// showcase field).
+	// generation and the pack toggle + speed are normal-mode only (see
+	// the showcase field).
 	sw := i32(0)
 	if hud.showcase {
 		// play, skip, die, trophy (static), share = 5 glyphs.

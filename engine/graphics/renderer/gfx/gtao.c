@@ -51,9 +51,13 @@ static struct
 	sg_view resultStorageView; // storage_image (Denoise final apply writes via imageStore)
 	sg_view resultSampleView;
 
-	sg_sampler linearSampler; // linear-filter, clamp, lit shaders sample tex_ao with this
-	sg_sampler pointSampler;  // point-clamp, bound by every GTAO compute (texelFetch doesn't filter, textureLod on the prefilter
-							  // chain needs point so neighbouring mip texels don't bilerp)
+	sg_sampler pointSampler;  // point-clamp. Bound by every GTAO compute (texelFetch doesn't
+							  // filter, textureLod on the prefilter chain needs point so
+							  // neighbouring mip texels don't bilerp) AND by the lit
+							  // shaders' tex_ao / the overlays' linear-depth view: those
+							  // sample full-res screen-space R32F 1:1 at texel centres,
+							  // where a level-0 point fetch is the exact value (WebGPU
+							  // cannot filter R32F at all — see GetAOSampler).
 
 	sg_shader prefilterShader;
 	sg_pipeline prefilterPipeline;
@@ -108,16 +112,6 @@ void InitAmbientOcclusion( void )
 	s_gtao.width = 0;
 	s_gtao.height = 0;
 	s_gtao.params = k_gtao_default_params;
-
-	sg_sampler_desc linDesc = { 0 };
-	linDesc.min_filter = SG_FILTER_LINEAR;
-	linDesc.mag_filter = SG_FILTER_LINEAR;
-	linDesc.mipmap_filter = SG_FILTER_NEAREST;
-	linDesc.wrap_u = SG_WRAP_CLAMP_TO_EDGE;
-	linDesc.wrap_v = SG_WRAP_CLAMP_TO_EDGE;
-	linDesc.wrap_w = SG_WRAP_CLAMP_TO_EDGE;
-	linDesc.label = "gtao_linear_sampler";
-	s_gtao.linearSampler = sg_make_sampler( &linDesc );
 
 	// sokol-gfx requires a sampler binding for every texture binding,
 	// even for texelFetch-only reads (the point/clamp choice is
@@ -317,11 +311,6 @@ void ShutdownAmbientOcclusion( void )
 		sg_destroy_sampler( s_gtao.pointSampler );
 		s_gtao.pointSampler.id = 0;
 	}
-	if ( s_gtao.linearSampler.id )
-	{
-		sg_destroy_sampler( s_gtao.linearSampler );
-		s_gtao.linearSampler.id = 0;
-	}
 	s_gtao.width = 0;
 	s_gtao.height = 0;
 }
@@ -362,8 +351,8 @@ void ResizeGTAO( int width, int height )
 
 	// Linear-depth color attachment: R32F where the GTAO chain samples
 	// it; throwaway RGBA8 on GLES3 (WebGL2 core cannot render into R32F
-	// and nothing there reads it — same pattern as shadow.c's dummy
-	// cascade colors).
+	// and nothing on this backend ever reads the linear-depth color —
+	// same pattern as shadow.c's dummy cascade colors).
 	sg_image_desc ldesc = { 0 };
 	ldesc.usage.color_attachment = true;
 	ldesc.width = width;
@@ -513,8 +502,8 @@ void ResizeGTAO( int width, int height )
 #else
 	// GLES3 `result`: 1x1 white RGBA8, a fully-lit ambient for the lit
 	// shaders' tex_ao; ClearAmbientOcclusion keeps it white. RGBA8 is
-	// color-renderable and filterable in WebGL2 core, which the lit
-	// shaders' float sample type on tex_ao requires.
+	// color-renderable and filterable, which the lit shaders' float
+	// sample type on tex_ao requires.
 	sg_image_desc rdesc = { 0 };
 	rdesc.usage.color_attachment = true;
 	rdesc.width = 1;
@@ -561,9 +550,16 @@ sg_view GetAOResultSampleView( void )
 	return s_gtao.resultSampleView;
 }
 
-sg_sampler GetAOLinearSampler( void )
+// Sampler for every GTAO texture sampled from a fragment/overlay shader
+// (the lit shaders' tex_ao, the overlays' float linear-depth view).
+// Point/clamp on every backend: those textures are full-res screen-space
+// R32F sampled 1:1 at texel centres, where a level-0 point fetch is the
+// exact value, and WebGPU cannot filter R32F at all. The shader tags
+// declare the pair unfilterable_float / nonfiltering, which sokol's
+// validation enforces on every backend (see gtao.h).
+sg_sampler GetAOSampler( void )
 {
-	return s_gtao.linearSampler;
+	return s_gtao.pointSampler;
 }
 
 void ClearAmbientOcclusion( void )

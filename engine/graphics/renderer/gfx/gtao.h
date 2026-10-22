@@ -45,6 +45,15 @@
 // color), and `result` becomes a 1x1 white RGBA8 target that
 // ClearAmbientOcclusion refreshes every frame, so lit shaders sample a
 // fully-lit ambient.
+//
+// The chain runs on SOKOL_WGPU too, but WebGPU cannot filter R32F, so
+// every fragment/overlay sample of a GTAO R32F texture must be a level-0
+// point fetch: the lit shaders' tex_ao and the overlays' linear-depth
+// view are tagged unfilterable_float / nonfiltering in the shader
+// sources, and GetAOSampler returns the point sampler (on every
+// backend — those textures are full-res and sampled 1:1 at texel
+// centres, where point is the exact value). All compute passes use
+// textureLoad only, so no R32F texture is ever hardware-filtered.
 
 // Most of the code and shaders for XeGTAO are ported from Esoterica Engine
 // https://github.com/BobbyAnguelov/Esoterica
@@ -164,7 +173,10 @@ void ClearAmbientOcclusion( void );
 // (XE_GTAO_OCCLUSION_TERM_SCALE).
 sg_view GetAOResultSampleView( void );
 
-sg_sampler GetAOLinearSampler( void );
+// Point-clamp sampler for every GTAO R32F texture sampled from a
+// fragment/overlay shader (the lit shaders' tex_ao, the overlays'
+// linear-depth view). See the header note on why it is point.
+sg_sampler GetAOSampler( void );
 
 #ifdef __cplusplus
 } // extern "C"

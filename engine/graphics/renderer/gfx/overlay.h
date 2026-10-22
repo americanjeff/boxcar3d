@@ -58,7 +58,7 @@ void OverlayAppendPoint( b3Vec3 p, Vec4 linearColor, float size, OverlayThicknes
 // cameraPos: world-space camera position
 // time: seconds since InitRenderer, packed into camera_pos.w.
 // linearDepthView: texture view over the R32F linear-depth pre-pass target.
-// linearDepthSampler: matching sampler (existing GetAOLinearSampler reused).
+// linearDepthSampler: matching sampler (existing GetAOSampler reused).
 // colorFormat: pixel format of the pass's color attachment.
 // depthFormat: pixel format of the pass's depth attachment, or
 // SG_PIXELFORMAT_NONE for a color-only target. Both select/build the cached pipeline pair.

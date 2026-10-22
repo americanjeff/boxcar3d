@@ -178,7 +178,7 @@
 	</div>
 
 	<script type="text/javascript" src="vendor/qrcode-generator.js"></script>
-	<script type="text/javascript" src="odin.js"></script>
+	<script type="text/javascript" src="odm-core.js"></script>
 	<script>
 		(function() {
 			var statusEl = document.getElementById("status");
@@ -455,6 +455,7 @@
 				parseInt(q.get("gen") || "0", 10) | 0,
 				parseInt(q.get("pack") || "0", 10) | 0,
 				parseInt(q.get("ff") || "0", 10) | 0,
+				q.has("ao") ? parseInt(q.get("ao") || "0", 10) | 0 : -1,
 			];
 
 			function odm_u64(s) {
@@ -466,52 +467,59 @@
 				odm_u64(q.get("terrain")),
 			];
 
-			var odinMemoryInterface = new odin.WasmMemoryInterface();
-			odinMemoryInterface.setIntSize(4);
-			var odinImports = odin.setupDefaultImports(odinMemoryInterface);
-
+			/* Bare-wasm boot: the glue (index.js = WebGPU / index-gles.js
+			   = WebGL2) defines window.__ODM_BACKEND__; odm-core.js
+			   instantiates the odin-driver-linked module (which exports
+			   shim_js_frame & co. directly)
+			   and drives the rAF loop. */
 			function loadVariant(glue, wasm) {
-				window.Module = {
-					instantiateWasm: (imports, successCallback) => {
-						const merged = { ...odinImports, ...imports };
-						return WebAssembly.instantiateStreaming(fetch(wasm), merged)
-							.then(function(output) {
-								var e = output.instance.exports;
-								odinMemoryInterface.setExports(e);
-								odinMemoryInterface.setMemory(e.memory);
-								return successCallback(output.instance);
-							})
-							.catch(function(err) {
-								fail("wasm load failed (" + wasm + "): " + err);
-								throw err;
-							});
-					},
-					onRuntimeInitialized: () => {
-						var e = wasmExports;
-						e._start();
-						e.main_start();
-						statusEl.style.display = "none";
-					},
-					canvas: document.getElementById("canvas")
-				};
 				var s = document.createElement("script");
 				s.src = glue;
+				s.onload = function() {
+					odmCore.boot({
+						wasmUrl: wasm,
+						canvas: document.getElementById("canvas"),
+						fail: fail,
+						ready: function() { statusEl.style.display = "none"; }
+					});
+				};
 				s.onerror = function() { fail("failed to load " + glue); };
 				document.body.appendChild(s);
 			}
 
 			var forceGl = q.get("gl") === "webgl2";
+			var forceWgpu = q.get("gl") === "webgpu";
 			var hasWebGpu = typeof navigator !== "undefined" && !!navigator.gpu;
-			if (forceGl || !hasWebGpu) {
+			function logBackend(which, reason) {
+				window.__odm_backend = which;
+				console.log("["@PROJECT@"] backend: " + which + (reason ? " (" + reason + ")" : ""));
+			}
+			if (forceGl) {
+				logBackend("webgl2", "forced via ?gl=webgl2");
+				loadVariant("index-gles.js", "index-gles.wasm");
+				return;
+			}
+			if (!hasWebGpu) {
+				logBackend("webgl2", "no WebGPU in this browser");
 				loadVariant("index-gles.js", "index-gles.wasm");
 				return;
 			}
 			navigator.gpu.requestAdapter().then(
 				function(adapter) {
-					if (adapter) { loadVariant("index.js", "index.wasm"); }
-					else { loadVariant("index-gles.js", "index-gles.wasm"); }
+					if (adapter) {
+						logBackend("webgpu", forceWgpu ? "forced via ?gl=webgpu" : "WebGPU adapter available");
+						loadVariant("index.js", "index.wasm");
+					} else {
+						if (forceWgpu) { fail("WebGPU forced (?gl=webgpu) but no adapter is available"); }
+						logBackend("webgl2", "no WebGPU adapter; fell back");
+						loadVariant("index-gles.js", "index-gles.wasm");
+					}
 				},
-				function() { loadVariant("index-gles.js", "index-gles.wasm"); }
+				function() {
+					if (forceWgpu) { fail("WebGPU forced (?gl=webgpu) but requestAdapter() rejected"); }
+					logBackend("webgl2", "requestAdapter() rejected; fell back");
+					loadVariant("index-gles.js", "index-gles.wasm");
+				}
 			);
 		})();
 	</script>

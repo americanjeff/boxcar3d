@@ -2,14 +2,13 @@
 // WASM shell around the shared frame driver (loop.odin): the browser
 // session IS the app - a cooperative, single-threaded evolution session
 // stepped from the frame callback. No files, no threads (only the headless
-// `evolve` CLI checkpoints genomes). This file owns the web entry (context
-// + the Emscripten allocator), the render-debug URL parameters, and the
-// tick budget.
+// `evolve` CLI checkpoints genomes). This file owns web_boot (the session's
+// boot sequence), the render-debug URL parameters, and the tick budget; the
+// entry point (main) lives in loop_wasm_main.odin.
 
 package main
 
 import "base:runtime"
-import "core:c"
 import "core:math"
 import "core:mem"
 import host "engine:apphost"
@@ -240,18 +239,14 @@ on_touch_cb :: proc "c" (phase, ident: i32, x, y: f32) {
 	}
 }
 
-// JS calls this after the Odin runtime boots (_start) and the wasm is
-// ready: sets up the Emscripten allocator, inits the driver + session,
-// hands control to sokol_app (which owns the rAF loop from here on).
-@(export)
-main_start :: proc "c" () {
-	context = runtime.default_context()
-	// Odin's default wasm allocator would manage its own heap separately
-	// from Emscripten's; sokol_app and Emscripten allocate via Emscripten's
-	// malloc, so route Odin through it too - one heap.
-	context.allocator = emscripten_allocator()
+// The web session's boot sequence: init the driver + session, read the URL
+// parameters, hand control to the apphost shim (which stores the callbacks;
+// the rAF loop then drives shim_js_frame). Runs on the driver's own
+// (libc-shim) heap — the entry point (loop_wasm_main.odin's main) is the
+// only one.
+web_boot :: proc(ctx: runtime.Context) {
 	runtime.init_global_temporary_allocator(1 * mem.Megabyte)
-	web_context = context
+	web_context = ctx
 
 	init_driver()
 	// A #car=<base64url> fragment (the share card's link) boots ON that
@@ -289,7 +284,7 @@ main_start :: proc "c" () {
 		session_init(&session, &cfg, WASM_SLOTS, nil)
 	}
 
-	// Render-debug URL parameters (?gen=G&pause=N&mode=M&pack=1&ff=1;
+	// Render-debug URL parameters (?gen=G&pause=N&mode=M&pack=1&ff=1&ao=0;
 	// ?seed=/terrain= went through windowed_evo_config above). N = the
 	// lead car's sim-tick count at which to freeze (see wasm_pause_ticks).
 	view_debug_mode = i32(host.Debug_Initial_View())
@@ -306,6 +301,10 @@ main_start :: proc "c" () {
 		// ?ff=1 - boot with "evolve in background" ON.
 		bg_evolve = true
 	}
+	if v := host.Debug_Initial_AO(); v >= 0 {
+		// ?ao=0 boots with ambient occlusion OFF (-1 = absent = on).
+		ao_enabled = v != 0
+	}
 
 	host.run_app(
 		init_cb = render_init_cb,
@@ -320,103 +319,3 @@ main_start :: proc "c" () {
 	)
 }
 
-// Routes Odin allocations through Emscripten's malloc/free via the C
-// foreign interface (one heap). Emscripten's malloc guarantees only
-// 16-byte alignment, but the runtime requests up to a full cache line
-// (64) - and for dynamic maps that is a HARD requirement: a map tags its
-// log2 capacity into the low 6 bits of the block pointer, so a
-// non-64-aligned block panics. We therefore over-allocate and align the
-// returned pointer ourselves; the true malloc base is kept in the 8 bytes
-// before the returned region so .Free/.Resize can release the original
-// block.
-
-@(default_calling_convention = "c")
-foreign _ {
-	@(link_name = "malloc")
-	_malloc :: proc(size: c.uint) -> rawptr ---
-
-	@(link_name = "free")
-	_free :: proc(ptr: rawptr) ---
-}
-
-emscripten_allocator :: proc() -> runtime.Allocator {
-	return runtime.Allocator{procedure = emscripten_alloc_proc, data = nil}
-}
-
-// Pick the aligned region out of `block` (malloc'd as size + align + 8)
-// and store the block base in the 8 bytes immediately before it.
-em_aligned_block :: proc(block: rawptr, align: int) -> rawptr {
-	data := mem.align_forward(cast(rawptr)(cast(uintptr)block + 8), uintptr(align))
-	header := cast(rawptr)(cast(uintptr)data - 8)
-	v := block
-	mem.copy(header, cast(rawptr)(&v), size_of(uintptr))
-	return data
-}
-
-em_block_of :: proc(data: rawptr) -> rawptr {
-	header := cast(rawptr)(cast(uintptr)data - 8)
-	v := uintptr(0)
-	mem.copy(cast(rawptr)(&v), header, size_of(uintptr))
-	return cast(rawptr)v
-}
-
-emscripten_alloc_proc :: proc(
-	allocator_data: rawptr,
-	mode: runtime.Allocator_Mode,
-	size, alignment: int,
-	old_memory: rawptr,
-	old_size: int,
-	loc := #caller_location,
-) -> (
-	[]u8,
-	runtime.Allocator_Error,
-) {
-	align := alignment
-	if align < 8 {align = 8} 	// header is 8 bytes; never align below that
-	#partial switch mode {
-	case .Alloc:
-		// .Alloc / .Resize must return zeroed (resp. zeroed-tail) memory:
-		// the runtime does NOT zero after the call, and malloc does not  - 
-		// zero here.
-		block := _malloc(c.uint(size + align + 8))
-		if block == nil {return nil, .Out_Of_Memory}
-		data := em_aligned_block(block, align)
-		mem.set(data, 0, size)
-		return (cast([^]u8)data)[:size], nil
-	case .Alloc_Non_Zeroed:
-		block := _malloc(c.uint(size + align + 8))
-		if block == nil {return nil, .Out_Of_Memory}
-		data := em_aligned_block(block, align)
-		return (cast([^]u8)data)[:size], nil
-	case .Resize:
-		// emscripten malloc has no realloc exposed here, so resize is
-		// always out-of-place (malloc + copy + zero tail + free).
-		block := _malloc(c.uint(size + align + 8))
-		if block == nil {return nil, .Out_Of_Memory}
-		data := em_aligned_block(block, align)
-		if old_memory != nil && old_size > 0 {
-			n := min(size, old_size)
-			copy((cast([^]u8)data)[:n], (cast([^]u8)old_memory)[:n])
-			_free(em_block_of(old_memory))
-		}
-		if size > old_size {
-			mem.set(raw_data((cast([^]u8)data)[old_size:size]), 0, size - old_size)
-		}
-		return (cast([^]u8)data)[:size], nil
-	case .Resize_Non_Zeroed:
-		block := _malloc(c.uint(size + align + 8))
-		if block == nil {return nil, .Out_Of_Memory}
-		data := em_aligned_block(block, align)
-		if old_memory != nil && old_size > 0 {
-			n := min(size, old_size)
-			copy((cast([^]u8)data)[:n], (cast([^]u8)old_memory)[:n])
-			_free(em_block_of(old_memory))
-		}
-		return (cast([^]u8)data)[:size], nil
-	case .Free:
-		if old_memory != nil {
-			_free(em_block_of(old_memory))
-		}
-	}
-	return nil, .Mode_Not_Implemented
-}

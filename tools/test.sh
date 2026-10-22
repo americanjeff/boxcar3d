@@ -38,12 +38,14 @@ OUT="$ROOT/build/test"
 mkdir -p "$OUT"
 
 # The graphics test links only engine:graphics, which (via the forked
-# renderer) references libbox3d math/timer symbols that live in
-# libphysics_native.a. Without a physics call pulling those objects in, a
-# single-pass static link leaves them undefined, so wrap the engine archives
-# in a linker group. (An app that pulls libbox3d via World_Step does not
-# need this.)
-GRAPHICS_LINK="-Wl,--start-group $ENGLIB/libgraphics_native.a $ENGLIB/libapphost_native.a $ENGLIB/libphysics_native.a -Wl,--end-group -lGL -ldl -lm -lpthread -lX11 -lXi -lXcursor"
+# renderer) references libbox3d math/hull symbols. Those live in the Odin
+# toolchain's prebuilt libbox3d.a (the physics tests get it automatically
+# via engine:physics's `foreign import lib`, but the graphics test does not
+# import engine:physics), so add it to the link group explicitly.
+ODIN_ROOT="$(odin root)"
+B3_LIB="$ODIN_ROOT/vendor/box3d/lib/linux-$(uname -m)/libbox3d.a"
+[ -f "$B3_LIB" ] || B3_LIB="$ODIN_ROOT/vendor/box3d/lib/linux-amd64/libbox3d.a"
+GRAPHICS_LINK="-Wl,--start-group $ENGLIB/libgraphics_native.a $ENGLIB/libapphost_native.a $ENGLIB/libphysics_native.a $B3_LIB -Wl,--end-group -lGL -ldl -lm -lpthread -lX11 -lXi -lXcursor"
 PHYSICS_LINK="$ENGLIB/libphysics_native.a -lm -lpthread"
 
 build_run() {

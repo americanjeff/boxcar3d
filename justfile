@@ -1,17 +1,16 @@
 # System requirements:
-#   native:  just, odin, gcc (C17), cmake + make, and the X11 + GL dev headers
+#   native:  just, odin, gcc (C17), and the X11 + GL dev headers
 #            the windowing shim links against (Debian/Ubuntu: libx11-dev
 #            libxi-dev libxcursor-dev libgl1-mesa-dev).
 #   fresh checkout: sokol-shdc on PATH - the generated shader headers are
 #            gitignored (they embed absolute paths), so the first build
 #            regenerates them. Prebuilt from floooh/sokol-tools-bin
 #            (bin/<platform>/sokol-shdc), or build from floooh/sokol-tools.
-#   wasm:    emsdk - emcc on PATH, or EMSDK_HOME pointing at the emsdk tree.
+#   wasm:    clang with a wasm32 target (any LLVM 16+).
 #   deploy:  wrangler + Cloudflare auth (`wrangler login` once).
 #   optional: python3 - re-baking the font atlas (apps/<app>/tools/bake_font.py)
 #            and `python3 -m http.server` when serving a wasm build locally.
-#   No version pins: rolling Odin dev (known good: dev-2026-10) and current
-#            emsdk (known good: 6.0.3).
+#   No version pins: rolling Odin dev (known good: dev-2026-10).
 #
 # App recipes take an optional [app]; without one they use the current
 # directory (must be inside apps/<name>/). Native is the default target,
