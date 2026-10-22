@@ -492,7 +492,7 @@
 			var hasWebGpu = typeof navigator !== "undefined" && !!navigator.gpu;
 			function logBackend(which, reason) {
 				window.__odm_backend = which;
-				console.log("["@PROJECT@"] backend: " + which + (reason ? " (" + reason + ")" : ""));
+				console.log("[" + "@PROJECT@" + "] backend: " + which + (reason ? " (" + reason + ")" : ""));
 			}
 			if (forceGl) {
 				logBackend("webgl2", "forced via ?gl=webgl2");

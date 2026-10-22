@@ -269,21 +269,28 @@ icon_draw_side_view :: proc(
 	return {ox, oy, ox + (maxx - minx) * scale, oy + (maxy - miny) * scale}
 }
 
-// The score panel's atlas slot: the slot's tile in the atlas as the raster
-// target (the shape is bit-identical to the share images). Sets the dirty
-// flag; call car_icon_flush to push the atlas to the GPU.
+// The score panel's atlas slot (the shape is bit-identical to the share
+// images). The tile is NOT contiguous in the atlas - ICON_COLS tiles share
+// each atlas row - so rasterize into a scratch tile, then blit it in row
+// by row. Sets the dirty flag; call car_icon_flush to push to the GPU.
 car_icon_raster :: proc(slot: int, g: ^Genome, colors: [N_COLORS][3]u8, broken: [8]bool) {
 	if icon_atlas == nil {return}
 	ensure(slot >= 0 && slot < ICON_SLOTS)
-	base := ((slot / ICON_COLS) * ICON_TILE_H * ICON_ATLAS_W +
-		(slot % ICON_COLS) * ICON_TILE_W) * 4
-	tile := icon_atlas[base : base + ICON_TILE_W * ICON_TILE_H * 4]
+	tmp := make([]u8, ICON_TILE_W * ICON_TILE_H * 4, context.allocator)
 	r := Icon_Raster {
-		pix = tile,
+		pix = tmp,
 		w   = ICON_TILE_W,
 		h   = ICON_TILE_H,
 	}
 	icon_slot_rect[slot] = icon_draw_side_view(&r, g, colors, broken)
+	row_b := ICON_TILE_W * 4
+	top := ((slot / ICON_COLS) * ICON_TILE_H * ICON_ATLAS_W +
+		(slot % ICON_COLS) * ICON_TILE_W) * 4
+	for y in 0 ..< ICON_TILE_H {
+		dst := icon_atlas[top + y*ICON_ATLAS_W*4 : top + (y*ICON_ATLAS_W + ICON_TILE_W)*4]
+		copy(dst, tmp[y*row_b : (y + 1)*row_b])
+	}
+	delete(tmp)
 	icon_atlas_dirty = true
 }
 

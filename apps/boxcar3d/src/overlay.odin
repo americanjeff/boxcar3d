@@ -77,7 +77,7 @@ render_ui_commands :: proc(ctx: ^microui.Context) {
 
 		case ^microui.Command_Text:
 			col := mu_color_to_f32(v.color)
-			draw_text(v.str, v.pos, col)
+			draw_text(v.str, v.pos, col, score_text_scale(v.font))
 
 		case ^microui.Command_Icon:
 			col := mu_color_to_f32(v.color)
@@ -92,9 +92,10 @@ render_ui_commands :: proc(ctx: ^microui.Context) {
 // advance) from font_glyphs, indexed by ASCII code. pos.y is the top of the
 // text line (microui convention); the field quad is placed at (pos.x + xoff -
 // SDF_SPREAD, pos.y + yoff - SDF_SPREAD) so it covers ink + distance-field
-// margin; the pen advances by xadvance.
+// margin; the pen advances by xadvance. ts scales the whole line (the score
+// rows' 1.5x text; 1.0 everywhere else).
 
-draw_text :: proc(str: string, pos: microui.Vec2, color: [4]f32) {
+draw_text :: proc(str: string, pos: microui.Vec2, color: [4]f32, ts: f32) {
 	px := f32(pos.x)
 	py := f32(pos.y)
 	for ch in str {
@@ -107,19 +108,19 @@ draw_text :: proc(str: string, pos: microui.Vec2, color: [4]f32) {
 		}
 		g := font_glyphs[r]
 		if g.aw > 0 && g.ah > 0 {
-			draw_glyph(g, px, py, color)
+			draw_glyph(g, px, py, color, ts)
 		}
-		px += g.xadvance * ui_dpp
+		px += g.xadvance * ui_dpp * ts
 	}
 }
 
 // The shader thresholds the field, so the ink edge lands exactly on the
 // glyph outline.
-draw_glyph :: proc(g: Glyph, px, py: f32, color: [4]f32) {
-	fw := f32(g.aw) / f32(SDF_RES) // field size in design px
-	fh := f32(g.ah) / f32(SDF_RES)
-	sx := px + (g.xoff - SDF_SPREAD) * ui_dpp
-	sy := py + (g.yoff - SDF_SPREAD) * ui_dpp
+draw_glyph :: proc(g: Glyph, px, py: f32, color: [4]f32, ts: f32) {
+	fw := f32(g.aw) / f32(SDF_RES) * ts // field size in design px
+	fh := f32(g.ah) / f32(SDF_RES) * ts
+	sx := px + (g.xoff - SDF_SPREAD) * ui_dpp * ts
+	sy := py + (g.yoff - SDF_SPREAD) * ui_dpp * ts
 	u0 := f32(g.ax) / f32(FONT_ATLAS_W)
 	v0 := f32(g.ay) / f32(FONT_ATLAS_H)
 	u1 := f32(g.ax + g.aw) / f32(FONT_ATLAS_W)

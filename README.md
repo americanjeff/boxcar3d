@@ -30,6 +30,11 @@ System requirements live in the root `justfile` header: `odin`, `gcc`,
 
 ## Changelog
 
+**0.1.3** - 2026-10-22
+
+- Fixed the score panel car portraits, which had lost most of the car - they now show the whole side view, wheels included.
+- Taller score rows and larger scores, with the car portraits enlarged to fill the row.
+
 **0.1.2** - 2026-10-22
 
 - The browser build no longer depends on Emscripten: it compiles with plain clang and the Odin driver, removing the dependency on emsdk.

@@ -99,13 +99,43 @@ font_text_height :: proc(font: microui.Font) -> i32 {
 // tprintf "{:.1f}"). build_ui subtracts it from one shared column so the
 // dots line down the list.
 font_dot_offset :: proc(str: string) -> f32 {
-	x := f32(0)
+	pre, _ := font_score_dots(str)
+	return pre
+}
+
+// The advances (design px) before and after a score string's decimal
+// point (score strings are ASCII). build_ui uses the widest pair to size
+// the portrait's box against the score column.
+font_score_dots :: proc(str: string) -> (pre, post: f32) {
+	dot := -1
+	i := 0
 	for ch in str {
-		if ch == '.' {return x}
-		r := int(ch)
-		if r < 128 {x += f32(font_glyphs[r].xadvance)}
+		if ch == '.' && dot < 0 {dot = i}
+		i += 1
 	}
-	return x
+	i = 0
+	for ch in str {
+		r := int(ch)
+		if r < 128 {
+			a := f32(font_glyphs[r].xadvance)
+			if i < dot {pre += a} else if i > dot {post += a}
+		}
+		i += 1
+	}
+	return
+}
+
+// The score rows' text scale (the rows run 50% taller than the font's line,
+// so the scores ride along). microui's Font is an opaque rawptr the app
+// never fills, so the handle carries the scale: 0 = normal, 1 = large;
+// overlay.odin's draw_text reads it back per command.
+SCORE_FONT := microui.Font(rawptr(uintptr(1)))
+
+score_text_scale :: proc(font: microui.Font) -> f32 {
+	if uintptr(font) == 1 {
+		return 1.5
+	}
+	return 1.0
 }
 
 // Per-frame input, called at the top of each frame before microui.begin.
@@ -207,9 +237,9 @@ ui_btn_col :: proc(lit, hover: bool) -> microui.Color {
 // The outline color fed to the SDF shader (straight 0-255).
 SHADOW_COL :: microui.Color{10, 10, 10, 160}
 
-ui_text :: proc(rect: microui.Rect, str: string, col: microui.Color) {
-	font := ui_ctx.style.font
-	lh := i32(f32(FONT_LINE_HEIGHT) * ui_dpp)
+ui_text :: proc(rect: microui.Rect, str: string, col: microui.Color,
+				font: microui.Font = ui_ctx.style.font) {
+	lh := i32(f32(FONT_LINE_HEIGHT) * ui_dpp * score_text_scale(font))
 	pos := microui.Vec2{rect.x, rect.y + (rect.h - lh) / 2}
 	microui.draw_text(&ui_ctx, font, str, pos, col)
 }
@@ -320,19 +350,25 @@ hud_car_row_less :: proc(a, b: Hud_Car) -> int {
 }
 
 // The portrait quad's size for one car row (ui_icon_rects): the visible
-// content (icon_slot_rect - the tile's center-fit, which leaves a
-// transparent left indent the pause/helix glyphs don't have; the car's left
-// edge must sit on the body's left edge) at the row's content height,
-// capped at the icon height (uniform gaps) and at (row pitch − 2) for
-// small fonts; the width follows the content aspect (the atlas is 2x
-// supersampled - downscaling is free).
-portrait_row_size :: proc(c: ^Hud_Car, row_pitch: i32) -> (pw, ph: i32) {
-	ph = min(i32(f32(min(ICON_H, ICON_S)) * ui_dpp), row_pitch - i32(2.0 * ui_dpp))
+// content (icon_slot_rect - the tile's center-fit) as large as the row
+// allows - full row height (the rows' spacing keeps the quads from
+// touching), width up to pw_max (the space left of the score column),
+// content aspect preserved (the atlas is 2x supersampled - downscaling is
+// free).
+portrait_row_size :: proc(c: ^Hud_Car, row_h: i32, pw_max: i32) -> (pw, ph: i32) {
 	cr := [4]f32{0, 0, f32(ICON_TILE_W), f32(ICON_TILE_H)}
 	if c.id >= 0 && c.id < ICON_SLOTS {cr = icon_slot_rect[c.id]}
 	cw, ch := cr[2] - cr[0], cr[3] - cr[1]
 	if cw <= 0 || ch <= 0 {cw, ch = f32(ICON_W), f32(ICON_H)}
-	pw = i32(cw * f32(ph) / ch)
+	s := f32(row_h) / ch
+	pw = i32(cw * s)
+	if pw > pw_max {
+		s = f32(pw_max) / cw
+		pw = pw_max
+	}
+	ph = i32(ch * s)
+	if pw < 1 {pw = 1}
+	if ph < 1 {ph = 1}
 	return
 }
 
@@ -353,9 +389,9 @@ build_ui :: proc(hud: ^Hud_Data) {
 	btn_gap := i32(f32(BTN_GAP) * ui_dpp)
 	panel_margin := i32(f32(PANEL_MARGIN) * ui_dpp)
 	gap6 := i32(f32(6) * ui_dpp)
-	row_h := lh
+	bh := lh // button-row height
+	row_h := lh * 3 / 2 // score rows run 50% taller than the text row
 	row_pitch := row_h + ui_ctx.style.spacing
-	bh := row_h // button-row height
 	// The two numbers on the control row: the generation (hugging the FF
 	// helix) and the best (hugging the trophy). Measured before sizing
 	// the pane, since the width follows them.
@@ -502,15 +538,23 @@ build_ui :: proc(hud: ^Hud_Data) {
 		hud.row_prev_n = hud.n_cars
 		// One decimal column for the whole list: find the widest portrait
 		// and the widest integer part so every score's dot lands at the
-		// same x (the dots line down the list).
-		max_pw := i32(0)
+		// same x (the dots line down the list). The portrait box is the
+		// panel width minus the gap and the score column (the dot offset +
+		// the fractional tail) - the largest the portraits may grow.
+		ss := score_text_scale(SCORE_FONT)
 		max_pre := f32(0)
+		max_post := f32(0)
 		for i in 0 ..< hud.n_cars {
-			c := &hud.cars[i]
-			pw, _ := portrait_row_size(c, row_pitch)
+			pre, post := font_score_dots(fmt.tprintf("{:.1f}", hud.cars[i].score))
+			if p := pre * ss; p > max_pre {max_pre = p}
+			if p := post * ss; p > max_post {max_post = p}
+		}
+		pw_max := sc.body.w - gap6 - i32((max_pre + max_post) * ui_dpp)
+		if pw_max < 1 {pw_max = 1}
+		max_pw := i32(0)
+		for i in 0 ..< hud.n_cars {
+			pw, _ := portrait_row_size(&hud.cars[i], row_h, pw_max)
 			if pw > max_pw {max_pw = pw}
-			pre := font_dot_offset(fmt.tprintf("{:.1f}", c.score))
-			if pre > max_pre {max_pre = pre}
 		}
 		dot_col := f32(sc.body.x + max_pw + gap6) + max_pre * ui_dpp
 		ui_icon_n = 0
@@ -521,8 +565,8 @@ build_ui :: proc(hud: ^Hud_Data) {
 			// in the segment colors + the wheels, one textured quad per row
 			// (drawn after the command list, see ui_icon_rects). A broken
 			// segment's wedge is missing from the silhouette.
-			pw, ph := portrait_row_size(c, row_pitch)
-			ir := microui.Rect{sc.body.x, ry + (lh - ph) / 2, pw, ph}
+			pw, ph := portrait_row_size(c, row_h, pw_max)
+			ir := microui.Rect{sc.body.x, ry + (row_h - ph) / 2, pw, ph}
 			ui_icon_rects[i] = ir
 			ui_icon_n = i + 1
 			if c.state == .Finished {
@@ -548,8 +592,9 @@ build_ui :: proc(hud: ^Hud_Data) {
 			}
 			// Decimal-aligned: every score's '.' sits at dot_col.
 			score := fmt.tprintf("{:.1f}", c.score)
-			tx := i32(dot_col - font_dot_offset(score) * ui_dpp)
-			ui_text({tx, ry, sc.body.x + sc.body.w - tx, lh}, score, scol)
+			tx := i32(dot_col - font_dot_offset(score) * ui_dpp *
+						score_text_scale(SCORE_FONT))
+			ui_text({tx, ry, sc.body.x + sc.body.w - tx, row_h}, score, scol, SCORE_FONT)
 		}
 		if hud.n_cars == 0 {
 			// No rows to push it down: the hold message takes the first
