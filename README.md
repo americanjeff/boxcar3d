@@ -30,6 +30,10 @@ System requirements live in the root `justfile` header: `odin`, `gcc`,
 
 ## Changelog
 
+**0.1.4** - 2026-10-28
+
+- Tooltips on the score panel controls: hover an icon to see what it does.
+
 **0.1.3** - 2026-10-22
 
 - Fixed the score panel car portraits, which had lost most of the car - they now show the whole side view, wheels included.
