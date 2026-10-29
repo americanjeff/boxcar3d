@@ -1176,24 +1176,68 @@ session_warm_start :: proc(s: ^Evo_Session, cfg: ^Evo_Config, n_slots: int, head
 	s.cur.index = 1
 }
 
+// Generation boundary: consume a completed generation - report +
+// ratchets + the next-gen env + breeding + the cur swap. The ONLY place
+// the line (and the floor, when mutable_floor) advances: the new env is
+// in force before any rollout of the new generation exists (the GA
+// reaches it with every slot idle; the display-primary driver, after the
+// displayed walk finished the rows). Precondition, checked here:
+// s.cur.done == len(s.cur.pop), with s.cur.fits / s.cur.res holding the
+// completed generation's results - the GA fills them in slot_finish, the
+// display driver from its row grid.
+generation_boundary :: proc(s: ^Evo_Session) -> (Gen_Event, bool) {
+	if s.cur.done != len(s.cur.pop) {return Gen_Event{}, false}
+	ev := gen_report(s.cur.fits[:])
+	ev.gen = s.cur.index
+	if ev.best > s.best_fit {
+		s.best_fit = ev.best
+	}
+	// The track extends (2× doubling, when reached): advance the
+	// ratcheted best (metres from the spawn) and, if the record has
+	// reached the line, grow the track for the next generation  -
+	// the line is the rollout terminal, not a display horizon.
+	for r in s.cur.res[:] {
+		// s.cur.env.line is still this generation's line (the swap
+		// below resets it).
+		m := rollout_score_m(r.best_x, s.cur.env.line)
+		if m > s.run_best_m {s.run_best_m = m}
+	}
+	// The new generation is born WITH its env pinned: the line is the
+	// ratcheted extension, the floor re-rolled when mutable_floor. It
+	// takes over cur before any rollout of it exists - the line advances
+	// with the generation swap.
+	nidx := s.cur.index + 1
+	nenv := s.cur.env
+	if s.cfg.mutable_floor {
+		nenv.seed = evo_terrain_seed(s.cfg) + u64(nidx)
+	}
+	nenv.line = adapt_track_len(s.run_best_m, s.cur.env)
+	env = nenv
+	gen_breed(&s.rng, s.cfg, &s.cur.pop, s.cur.fits[:])
+	s.cur.index = nidx
+	s.cur.env = nenv
+	s.cur.next = 0
+	s.cur.done = 0
+	if s.cfg.mutable_floor {
+		regenerate_terrain(nenv.seed)
+	}
+	return ev, true
+}
+
 // Advance the session: start pending rollouts into idle slots, then give
 // each active slot one tick per round until `tick_budget` is spent. A
-// just-completed generation is consumed (report + breed + next-gen env)
-// and its event returned; otherwise (zero, false). Every car is driven by
-// the fixed PID (PID_COEFF).
+// just-completed generation is consumed by generation_boundary and its
+// event returned; otherwise (zero, false). Every car is driven by the
+// fixed PID (PID_COEFF).
 //
-// The generation swap is the ONLY place the line (and the floor, when
-// mutable_floor) advances - the boundary is reached with all slots idle,
-// so the new env is in force before any slot of the new generation exists.
 // The per-frame slot-start cap spreads a fresh generation's starts across
 // frames (one frame otherwise takes ~8 world allocations + rollout files
 // at every gen start); the start ORDER is unchanged (slot order, then
-// rollout order), so each rollout still receives the same tick sequence  - 
+// rollout order), so each rollout still receives the same tick sequence  -
 // results untouched, only wall-clock pacing.
 SESSION_STARTS_PER_FRAME :: int(2)
 
 session_step :: proc(s: ^Evo_Session, tick_budget: int) -> (Gen_Event, bool) {
-	ev := Gen_Event{}
 	budget := tick_budget
 	for budget > 0 {
 		started := false
@@ -1224,46 +1268,12 @@ session_step :: proc(s: ^Evo_Session, tick_budget: int) -> (Gen_Event, bool) {
 			s.cur.fits[idx] = s.cur.res[idx].fitness
 			s.cur.done += 1
 		}
-		if s.cur.done == len(s.cur.pop) {
-			ev = gen_report(s.cur.fits[:])
-			ev.gen = s.cur.index
-			if ev.best > s.best_fit {
-				s.best_fit = ev.best
-			}
-			// The track extends (2× doubling, when reached): advance the
-			// ratcheted best (metres from the spawn) and, if the record has
-			// reached the line, grow the track for the next generation  - 
-			// the line is the rollout terminal, not a display horizon.
-			for r in s.cur.res[:] {
-				// s.cur.env.line is still this generation's line (the
-				// swap below resets it).
-				m := rollout_score_m(r.best_x, s.cur.env.line)
-				if m > s.run_best_m {s.run_best_m = m}
-			}
-			// The new generation is born WITH its env pinned: the line is
-			// the ratcheted extension, the floor re-rolled when
-			// mutable_floor. It takes over cur before any slot of it
-			// spawns - the line advances with the generation swap.
-			nidx := s.cur.index + 1
-			nenv := s.cur.env
-			if s.cfg.mutable_floor {
-				nenv.seed = evo_terrain_seed(s.cfg) + u64(nidx)
-			}
-			nenv.line = adapt_track_len(s.run_best_m, s.cur.env)
-			env = nenv
-			gen_breed(&s.rng, s.cfg, &s.cur.pop, s.cur.fits[:])
-			s.cur.index = nidx
-			s.cur.env = nenv
-			s.cur.next = 0
-			s.cur.done = 0
-			if s.cfg.mutable_floor {
-				regenerate_terrain(nenv.seed)
-			}
+		if ev, done := generation_boundary(s); done {
 			return ev, true
 		}
 		if active == 0 && !started {break}
 	}
-	return ev, false
+	return Gen_Event{}, false
 }
 
 // Single-threaded driver over the session: the exact code the wasm frame

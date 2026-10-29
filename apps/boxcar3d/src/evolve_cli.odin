@@ -958,17 +958,16 @@ run_evolve_test :: proc(fast: bool) -> int {
 	fmt.printfln("evolvetest: pop_viewer separate worlds finite + lead resolves")
 
 	// 7. Windowed lifecycle: the shared driver procs (step_session →
-	//    solo_push → view_advance) over a short session - the in-frame
-	//    windowed loop (app_frame's branch) without rendering. Verifies the
-	//    snapshot hand-off (to the shared solo snapshot - the pack now
-	//    derives from it), the in-sync pacing (the session pauses while a
-	//    snapshot is buffered), and clean teardown.
-	//    PROVISIONAL START: the first build must happen while the
-	//    session is still evaluating the displayed generation (the view
-	//    began from genes alone - session.cur.index == solo.last.index at
-	//    build time). Rows the solo finalizes after the eval completes are
-	//    asserted equal to the GA's records in-frame (solo_finish_car /
-	//    solo_adopt_results) - a determinism mismatch crashes the test.
+	//    offer_provisional → view_advance → display_primary_boundary) over
+	//    a short session - the in-frame windowed loop (app_frame's branch)
+	//    without rendering, helix OFF (display-primary): the session never
+	//    evaluates, the displayed walk IS the eval, and its rows feed the
+	//    boundary that breeds the next generation. Verifies the snapshot
+	//    hand-off, the display-primary invariant (the walked gen is always
+	//    session.cur - the next gen does not exist yet), and clean teardown.
+	//    PROVISIONAL START: the view begins every generation from genes
+	//    alone (the record arrives WITH the walk, row by row) -
+	//    session.cur.index == solo.last.index at build time, every build.
 	{
 		tc := default_evo_config()
 		tc.pop = 4
@@ -980,8 +979,9 @@ run_evolve_test :: proc(fast: bool) -> int {
 		for frames := 0; frames < 10000 && built < 2; frames += 1 {
 			step_session(48)
 			// Mirror the driver's step branch (loop.odin): a generation
-			// completes when solo_step reports the last car done - solo_is_ready
-			// only flips on destroy, so the advance rides the step return.
+			// completes when solo_step reports the last car done - the
+			// display-primary boundary then breeds + offers the next gen,
+			// and the advance takes it (the driver's same-frame sequence).
 			if solo_is_ready() {
 				gen_done := false
 				// Display the car at the driver's speed (8 ticks/frame).
@@ -992,16 +992,14 @@ run_evolve_test :: proc(fast: bool) -> int {
 					}
 				}
 				if gen_done {
+					display_primary_boundary()
 					built += view_advance() ? 1 : 0
-					if built > 0 && solo.last.index == session.cur.index {
-						provisional = true // the session is still on this gen
-					}
 				}
 			} else {
 				built += view_advance() ? 1 : 0
-				if built > 0 && solo.last.index == session.cur.index {
-					provisional = true // the session is still on this gen
-				}
+			}
+			if built > 0 && solo.last.index == session.cur.index {
+				provisional = true // the display-primary invariant holds
 			}
 		}
 		if built < 2 {
@@ -1021,11 +1019,11 @@ run_evolve_test :: proc(fast: bool) -> int {
 			)
 			return 1
 		}
-		// RE-SEED: re-roll the
-		// population mid-walk - the solo must be on the NEW lineage within a
-		// couple of frames (provisional start from the re-rolled genes), not
-		// after the new generation's full eval. Mirrors the window's
-		// reseed_cars handler (handle_controls in loop.odin).
+		// RE-SEED: re-roll the population mid-walk - the solo must be on
+		// the NEW lineage within a couple of frames (provisional start
+		// from the re-rolled genes), not after the new generation's full
+		// eval. Mirrors the window's reseed_cars handler (handle_controls
+		// in loop.odin).
 		reseed_min_gen = session.cur.index + 1
 		gen_base = reseed_min_gen
 		min_gen := reseed_min_gen
@@ -1041,6 +1039,7 @@ run_evolve_test :: proc(fast: bool) -> int {
 			if solo_is_ready() {
 				for _ in 0 ..< 8 {
 					if !solo_step(1.0 / 60.0) {
+						display_primary_boundary()
 						view_advance()
 						break
 					}
@@ -1142,14 +1141,15 @@ run_evolve_test :: proc(fast: bool) -> int {
 		)
 	}
 
-	// 17. Windowed PACK lifecycle: the pack starts PROVISIONAL  - 
-	//     the whole population in index order needs no ranking, so it builds
-	//     the generation the same frame it is offered, before its own eval
-	//     has finished. Headless mirror of the driver's pack branch
-	//     (loop.odin): build from solo.last at either stage, race, advance.
+	// 17. Windowed PACK lifecycle (helix off / display-primary): the pack
+	//     starts PROVISIONAL - the whole population in index order needs no
+	//     ranking, so it builds the generation the same frame it is offered.
+	//     Headless mirror of the driver's pack branch (loop.odin): build
+	//     from solo.last, race, and at race end the race IS the eval -
+	//     stamp the rows, feed the boundary (breed + offer), advance.
 	//     The first build is checked to have happened while the session was
-	//     still evaluating that generation (snapshot incomplete, session
-	//     not bred past it) - the pack waited for nothing.
+	//     still ON that generation (the display-primary invariant: the next
+	//     gen does not exist yet - the pack waited for nothing).
 	{
 		view_mode = 0
 		teardown_gate_session()
@@ -1169,6 +1169,11 @@ run_evolve_test :: proc(fast: bool) -> int {
 				for _ in 0 ..< 8 {
 					if !pop_viewer_step(1.0 / 60.0) {
 						races += 1 // the race just ended
+						// The driver's display-primary round end (loop.odin):
+						// the race IS the eval - stamp the rows, breed +
+						// offer the next gen, then take it.
+						pack_stamp_rows()
+						display_primary_boundary()
 						pop_viewer_destroy()
 						view_advance()
 						break
@@ -1209,88 +1214,9 @@ run_evolve_test :: proc(fast: bool) -> int {
 			view_mode = 1
 			return 1
 		}
-		// (G) The in-sync pacing gate (loop.odin step_session): the session
-		//     may eval the pending generation only WHILE the active view is
-		//     consuming the current one; one boundary past the buffered
-		//     snapshot it pauses again, and a holding view always pauses it.
-		{
-			teardown_gate_session()
-			gc := default_evo_config()
-			gc.pop = 4
-			gc.elite = 1
-			gc.seed = 0x77
-			session_init(&session, &gc, 2, nil)
-			// Run to the gen-0 boundary: fresh gen 1, nothing started.
-			for i := 0; i < 20000 && session.cur.index < 1; i += 1 {
-				_, done := session_step(&session, 48)
-				if done {break}
-			}
-			if session.cur.index < 1 {
-				fmt.eprintfln(
-					"evolvetest: gate: gen 0 did not complete (gen={})",
-					session.cur.index,
-				)
-				view_mode = 1
-				return 1
-			}
-			// pending = the offered provisional gen 1; the session sits on
-			// gen 1 with no car started.
-			solo_push(build_solo_provisional(&session.cur))
-			// (A) the pack "consuming" (ready) → the session may eval gen 1
-			//     (a step must land: a car starts, or - for an
-			//     all-instantly-failing pop - the whole gen completes).
-			pop_viewer.ready = true
-			gen_before := session.cur.index
-			step_session(48)
-			if session.cur.index == gen_before && session.cur.next == 0 {
-				fmt.eprintfln(
-					"evolvetest: gate (A): no eval while the pack races (gen={}, next={})",
-					session.cur.index,
-					session.cur.next,
-				)
-				view_mode = 1
-				return 1
-			}
-			// (B) run to the gen-1 boundary: adopt completes the pending in
-			//     place, the gen-2 offer is blocked (the pending slot is
-			//     held), and one boundary past it the session must pause.
-			for i := 0; i < 20000 && session.cur.index < 2; i += 1 {
-				step_session(48)
-			}
-			if session.cur.index < 2 || !solo.pending.complete {
-				fmt.eprintfln(
-					"evolvetest: gate (B): gen 1 did not complete in place (gen={}, complete={})",
-					session.cur.index,
-					solo.pending.complete,
-				)
-				view_mode = 1
-				return 1
-			}
-			step_session(48)
-			if session.cur.next != 0 {
-				fmt.eprintfln(
-					"evolvetest: gate (B): session ran past the buffered snapshot (next={})",
-					session.cur.next,
-				)
-				view_mode = 1
-				return 1
-			}
-			// (C) the pack holding (not ready) → the session pauses.
-			pop_viewer.ready = false
-			step_session(48)
-			if session.cur.next != 0 {
-				fmt.eprintfln(
-					"evolvetest: gate (C): session stepped while the pack holds (next={})",
-					session.cur.next,
-				)
-				view_mode = 1
-				return 1
-			}
-			teardown_gate_session()
-		}
 		view_mode = 1
 		fmt.printfln(
-			"evolvetest: windowed pack starts provisional + pacing gate (races={})",
+			"evolvetest: windowed pack starts provisional, display-primary rows breed the next gen (races={})",
 			races,
 		)
 	}
@@ -1329,16 +1255,15 @@ run_evolve_test :: proc(fast: bool) -> int {
 		fmt.printfln("evolvetest: view sequence (pack→solo→restart→next) OK")
 	}
 
-	// 19. Track re-seed determinism (the mid-generation re-seed hole): a
-	//     terrain re-roll invalidates the current generation's eval - the
-	//     session re-runs it from scratch on the new profile (cur.env
-	//     re-pinned to the fresh frontier), a pending snapshot carrying an
-	//     old-terrain record is dropped, and the generation on screen is
-	//     re-walked (eval still in flight) or stopped (record already
-	//     adopted). A stale record against a new-terrain display row trips
-	//     the solo determinism assert (process crash = nonzero exit), so
-	//     SURVIVING both re-seeds with evolution still progressing is the
-	//     gate.
+	// 19. Track re-seed determinism, display-primary (helix off): a terrain
+	//     re-roll invalidates the current generation's eval - the session's
+	//     record is reset (session_invalidate_eval, cur.env re-pinned to
+	//     the fresh frontier) and the generation on screen is re-walked:
+	//     in this mode the rows ARE the eval, so a mid-walk re-seed abandons
+	//     the partial rows and the walk re-derives them on the new ground.
+	//     SURVIVING both re-seeds - one on the first walk, one after a
+	//     boundary (the row-fed lineage is in force) - with evolution still
+	//     progressing is the gate.
 	if fast {
 		fmt.printfln("evolvetest: case 19 (track reseed) skipped - fast tier")
 	} else {
@@ -1355,24 +1280,23 @@ run_evolve_test :: proc(fast: bool) -> int {
 		early, late := false, false
 		for frame := 0; frame < 40000 && !(early && late); frame += 1 {
 			step_session(48)
-			// (A) re-seed EARLY in a walk: the on-screen generation's eval
-			//     is still in flight -> the re-walk branch (both sides
-			//     re-run on the new terrain).
+			// (A) re-seed EARLY in the first walk: the on-screen generation
+			//     is still being evaluated -> the re-walk branch (the rows
+			//     are re-derived on the new terrain).
 			if !early && solo_is_ready() && !solo.last.complete {
 				hud.reseed_track = true
 				early = true
 			}
-			// (B) re-seed LATE in a walk: the on-screen record is adopted
-			//     (complete) and the next generation is pending -> the
-			//     stop-walk branch.
-			if early && !late && solo_is_ready() && solo.last.complete && solo_has_pending() {
+			// (B) re-seed LATE: the display is walking a POST-BOUNDARY
+			//     generation (the rows of a previous gen already fed a
+			//     boundary) -> the re-walk branch on the row-fed lineage.
+			if early && !late && solo_is_ready() && session.cur.index > 0 {
 				hud.reseed_track = true
 				late = true
 			}
 			handle_controls(&hud)
-			// After the mid-walk re-seed (A), the in-flight re-eval races
-			// the NEW ground: the session's current env mirrors the
-			// frontier (fresh seed, same line) for the rest of the run.
+			// After a mid-walk re-seed, the session's current env mirrors
+			// the frontier (fresh seed, same line) for the rest of the run.
 			if early && session.cur.env.seed != env.seed {
 				fmt.eprintfln(
 					"evolvetest: track reseed: re-eval did not take the new ground (cur={} env={})",
@@ -1407,7 +1331,7 @@ run_evolve_test :: proc(fast: bool) -> int {
 		}
 		teardown_gate_session()
 		view_mode = 1
-		fmt.printfln("evolvetest: track reseed (early + late mid-walk) OK")
+		fmt.printfln("evolvetest: track reseed (early + post-boundary mid-walk, display-primary) OK")
 	}
 
 	// 20. FF-mode determinism:
@@ -1520,7 +1444,307 @@ run_evolve_test :: proc(fast: bool) -> int {
 		fmt.printfln("evolvetest: ff re-seed keeps adopted env; foreign rows never assert")
 	}
 
-	// 21. Degenerate-wedge skip (fan_wedge_degenerate): two failure modes
+	// 21. Display-primary lineage parity (gate A): the same seed driven two
+	//     ways - the GA's own eval (session_step) vs the display walk
+	//     (helix off: the rows feed the boundary) - must breed the SAME
+	//     generations. After two boundaries, the bred population (gene for
+	//     gene), the env (seed + line), best_fit, and the line ratchet all
+	//     agree. The rows ARE the eval: a drift in any row field (score,
+	//     best_x, ...) surfaces here as a different lineage.
+	{
+		sim_paused = false
+		reseed_min_gen = 0
+		teardown_gate_session()
+		ac := default_evo_config()
+		ac.pop = 4
+		ac.elite = 1
+		ac.seed = 0xA5
+		// (1) The GA's own eval - the reference lineage.
+		session_init(&session, &ac, 2, nil)
+		for i := 0; i < 100000 && session.cur.index < 2; i += 1 {
+			_, _ = session_step(&session, 72)
+		}
+		if session.cur.index < 2 {
+			fmt.eprintfln("evolvetest: gate A: GA path stalled (gen={})", session.cur.index)
+			return 1
+		}
+		ga_pop := make([]Genes, len(session.cur.pop))
+		copy(ga_pop[:], session.cur.pop[:])
+		ga_env := session.cur.env
+		ga_best := session.best_fit
+		ga_ratchet := session.run_best_m
+		session_destroy(&session)
+		// (2) The display walk (helix off): the driver procs, solo view.
+		session_init(&session, &ac, 2, nil)
+		bg_evolve = false
+		view_mode = 1
+		for i := 0; i < 100000 && session.cur.index < 2; i += 1 {
+			step_session(48)
+			if solo_is_ready() {
+				gen_done := false
+				for _ in 0 ..< 8 {
+					if !solo_step(1.0 / 60.0) {
+						gen_done = true
+						break
+					}
+				}
+				if gen_done {
+					display_primary_boundary()
+					view_advance()
+				}
+			} else {
+				view_advance()
+			}
+		}
+		if session.cur.index < 2 {
+			fmt.eprintfln("evolvetest: gate A: display path stalled (gen={})", session.cur.index)
+			return 1
+		}
+		parity := session.cur.index == 2
+		if parity {
+			parity = session.cur.env.seed == ga_env.seed &&
+				session.cur.env.line == ga_env.line
+		}
+		if parity {
+			parity = session.best_fit == ga_best &&
+				session.run_best_m == ga_ratchet
+		}
+		if parity {
+			for i in 0 ..< len(session.cur.pop) {
+				if session.cur.pop[i] != ga_pop[i] {
+					parity = false
+					break
+				}
+			}
+		}
+		solo_cleanup()
+		session_destroy(&session)
+		delete(ga_pop)
+		if !parity {
+			fmt.eprintfln(
+				"evolvetest: gate A: lineage diverged (dp: gen={} env={}/{}, best={}, ratchet={}; ga: gen=2 env={}/{}, best={}, ratchet={})",
+				session.cur.index,
+				session.cur.env.seed,
+				session.cur.env.line,
+				session.best_fit,
+				session.run_best_m,
+				ga_env.seed,
+				ga_env.line,
+				ga_best,
+				ga_ratchet,
+			)
+			return 1
+		}
+		view_mode = 1
+		fmt.printfln(
+			"evolvetest: gate A: display-primary lineage == GA lineage (2 gens, pop={}, env seed={}, line={})",
+			ac.pop,
+			ga_env.seed,
+			ga_env.line,
+		)
+	}
+
+	// 22. Ghost-finish parity (gate B): a skipped pack race - the still-
+	//     live cars re-run headless to their natural terminals (the ghost)
+	//     - must stamp rows that are EXACTLY the GA's record for that
+	//     generation (score, best_x, outcome, time, per car): the ghost is
+	//     a hidden re-run of the display pipeline, and the rows are what
+	//     the boundary breeds from. Two skip points: 1 tick in (the full
+	//     re-run, guaranteed live) and 500 ticks in (the partial-stop
+	//     shape whenever the race has already shed cars).
+	{
+		sim_paused = false
+		reseed_min_gen = 0
+		teardown_gate_session()
+		bc := default_evo_config()
+		bc.pop = 4
+		bc.elite = 1
+		bc.seed = 0xB7
+		// (1) The GA's record for gen 0 - the reference. After the
+		//     boundary, cur.index is 1, but fits/res still hold gen 0's
+		//     record (gen_breed writes pop only).
+		session_init(&session, &bc, 2, nil)
+		for i := 0; i < 100000; i += 1 {
+			_, done := session_step(&session, 72)
+			if done {break}
+		}
+		if session.cur.index < 1 {
+			fmt.eprintfln("evolvetest: gate B: gen 0 did not complete (gen={})", session.cur.index)
+			return 1
+		}
+		n := len(session.cur.res)
+		ga_fits := make([]f64, n)
+		copy(ga_fits[:], session.cur.fits[:])
+		ga_res := make([]Eval_Result, n)
+		copy(ga_res[:], session.cur.res[:])
+		session_destroy(&session)
+		// (2) Two display-side runs (fresh gen-0 population each - same
+		//     seed), pack view, skip at T ticks, ghost to completion.
+		ticks := [2]int{1, 500}
+		for t := 0; t < len(ticks); t += 1 {
+			t_ticks := ticks[t]
+			teardown_gate_session()
+			session_init(&session, &bc, 2, nil)
+			bg_evolve = false
+			view_mode = 0
+			for i := 0; i < 100 && !pop_viewer_is_ready(); i += 1 {
+				step_session(48)
+				view_advance()
+			}
+			if !pop_viewer_is_ready() {
+				fmt.eprintfln("evolvetest: gate B: pack did not start (pass T={})", t_ticks)
+				return 1
+			}
+			for i := 0; i < t_ticks; i += 1 {
+				if !pop_viewer_step(1.0 / 60.0) {break}
+			}
+			pack_skip_ghost()
+			for i := 0; i < 500 && pop_viewer.ghost; i += 1 {
+				ghost_step()
+			}
+			if pop_viewer.ghost {
+				fmt.eprintfln("evolvetest: gate B: ghost did not finish (pass T={})", t_ticks)
+				return 1
+			}
+			// The raced generation is gen 0 (the boundary in ghost_done
+			// already advanced cur past it).
+			ok := solo.rows_gen == 0 && solo.row_n == n
+			if ok {
+				for i in 0 ..< n {
+					r := solo.rows[i]
+					if r.car != i ||
+						r.score != ga_fits[i] ||
+						r.best_x != ga_res[i].best_x ||
+						r.outcome != ga_res[i].outcome ||
+						r.time != ga_res[i].fail_time {
+						ok = false
+						break
+					}
+				}
+			}
+			if !ok {
+				fmt.eprintfln(
+					"evolvetest: gate B: ghost rows != GA record (pass T={} rows_gen={} row_n={}/{} rows[0]={{{} {} {} {}}} ga[0]={{{} {} {}}})",
+					t_ticks,
+					solo.rows_gen,
+					solo.row_n,
+					n,
+					solo.rows[0].car,
+					solo.rows[0].score,
+					solo.rows[0].outcome,
+					solo.rows[0].time,
+					ga_fits[0],
+					ga_res[0].best_x,
+					ga_res[0].fail_time,
+				)
+				return 1
+			}
+		}
+		teardown_gate_session()
+		delete(ga_fits)
+		delete(ga_res)
+		view_mode = 1
+		fmt.printfln("evolvetest: gate B: ghost rows == GA record (T=1 and T=500 skips, pop={})", bc.pop)
+	}
+
+	// 23. Mode-switch gate (gate C): helix off -> on -> off mid-walk, driven
+	//     through the REAL driver procs (handle_controls + step_active_view
+	//     + step_session). (1) The display walks in display-primary; (2)
+	//     the helix on: the GA re-takes the eval and the runtime assert
+	//     re-arms (adopted record + live rows must match or the process
+	//     crashes); (3) the helix off while the GA has RACED AHEAD: the
+	//     takeover rewinds the session to the walked generation (in-flight
+	//     GA work closed out, the stale pending discarded) and the
+	//     invariant returns (walked == cur); (4) the walk completes, the
+	//     rows breed the next generation, and the view takes it.
+	if fast {
+		fmt.printfln("evolvetest: case 23 (mode switch) skipped - fast tier")
+	} else {
+		sim_paused = false
+		reseed_min_gen = 0
+		teardown_gate_session()
+		vc := default_evo_config()
+		vc.pop = 4
+		vc.tel_dir = ""
+		session_init(&session, &vc, 4, nil)
+		view_mode = 1
+		hud = Hud_Data{}
+		hud.speed = 2
+		bg_evolve = false
+		// (1) Display-primary: walk until one boundary is behind.
+		for i := 0; i < 30000 && session.cur.index < 1; i += 1 {
+			step_session(48)
+			handle_controls(&hud)
+			step_active_view()
+		}
+		if session.cur.index < 1 {
+			fmt.eprintfln("evolvetest: case 23: first walk did not complete (gen={})", session.cur.index)
+			return 1
+		}
+		// (2) Helix on: the GA re-takes the eval; the walk's generation is
+		//     adopted when the GA completes it (the live assert re-arms -
+		//     a row/record mismatch crashes the process).
+		hud.ff = true
+		hud.ff_requested = true
+		handle_controls(&hud)
+		for i := 0; i < 30000 && !solo.last.complete; i += 1 {
+			step_session(48)
+			handle_controls(&hud)
+			step_active_view()
+		}
+		if !solo.last.complete {
+			fmt.eprintfln("evolvetest: case 23: ff re-take never adopted the walked gen")
+			return 1
+		}
+		if session.cur.index <= solo.last.index {
+			fmt.eprintfln(
+				"evolvetest: case 23: ff did not race ahead (cur={} last={})",
+				session.cur.index,
+				solo.last.index,
+			)
+			return 1
+		}
+		if !solo.active && solo.row_n >= len(solo.last.pop) {
+			fmt.eprintfln("evolvetest: case 23: walk already over when switching off (no rewind exercised)")
+			return 1
+		}
+		// (3) Helix off, mid-walk, behind the GA: the takeover rewinds.
+		hud.ff = false
+		hud.ff_requested = true
+		handle_controls(&hud)
+		if session.cur.index != solo.last.index || session.cur.next != 0 || session.cur.done != 0 {
+			fmt.eprintfln(
+				"evolvetest: case 23: takeover did not restore the invariant (cur={} last={} next={} done={})",
+				session.cur.index,
+				solo.last.index,
+				session.cur.next,
+				session.cur.done,
+			)
+			return 1
+		}
+		// (4) The walk completes: the rows breed the next generation and
+		//     the view takes it (the invariant holds through the round end).
+		walked := solo.last.index
+		for i := 0; i < 60000 && solo.last.index <= walked; i += 1 {
+			step_session(48)
+			handle_controls(&hud)
+			step_active_view()
+		}
+		if solo.last.index != walked + 1 || session.cur.index != walked + 1 {
+			fmt.eprintfln(
+				"evolvetest: case 23: post-takeover round did not advance (last={} cur={})",
+				solo.last.index,
+				session.cur.index,
+			)
+			return 1
+		}
+		bg_evolve = false
+		teardown_gate_session()
+		view_mode = 1
+		fmt.printfln("evolvetest: case 23: off->on->off mid-walk, takeover rewinds, rows breed the next gen OK")
+	}
+
+	// 24. Degenerate-wedge skip (fan_wedge_degenerate): two failure modes
 	// the phenotype refuses to build (no hulls, no mesh, no mass). A PAPER
 	// BLADE - a long ring edge whose fan triangle is thinner than its tip's
 	// per-substep travel at the design tumble (fan_floor) - tunnels through
@@ -1666,7 +1890,7 @@ run_evolve_test :: proc(fast: bool) -> int {
 		)
 	}
 
-	// 22. Adjacent-missing cap rule (cap_refresh_decision, the pure core of
+	// 25. Adjacent-missing cap rule (cap_refresh_decision, the pure core of
 	// refresh_car_caps): a cap's void flags freeze into the mesh at build
 	// time, and breaks only ACCUMULATE (a missing segment never comes back),
 	// so the viewer re-runs the decision on every break tick and each cap's

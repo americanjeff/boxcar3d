@@ -85,8 +85,11 @@ wasm_frame :: proc() {
 	}
 
 	// The car portraits (icon-atlas quads) join the same overlay frame.
+	// The tooltip goes LAST: the overlay pass is a flat painter (no depth
+	// test), so it must be issued after the portraits to float over them.
 	render_ui_commands(&ui_ctx)
 	car_icon_render(&hud)
+	ui_tooltip_render()
 	// Pause-time console dump of the on-screen car (genome + geometry + sim),
 	// fired on the rising edge of sim_paused.
 	maybe_pause_dump()

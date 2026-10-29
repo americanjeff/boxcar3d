@@ -6,15 +6,37 @@
 // (loop_native.odin / loop_wasm.odin) own the entry point, the tick budget,
 // and the I/O hooks.
 //
-// Provisional start: at init, after a re-seed, and at every boundary the
-// views begin the generation whose GENES EXIST NOW, before the session has
-// evaluated a single car; each displayed row is later asserted equal to
-// the eval's recorded result (the live determinism gate), and the pack
-// starts the same frame it is offered (its lineup needs no ranking).
+// TWO EVALUATION MODES (the helix toggle, `bg_evolve`):
 //
-// Pacing (in-sync cap vs fast-forward lead over the displayed view, and
-// generation offers): the canonical contracts are step_session +
-// offer_provisional.
+// HELIX OFF (default) - display-primary: the session NEVER evaluates. The
+// displayed walk of a generation (solo: one car at a time; pack: the
+// race) IS the evaluation - its rows (row_from_run) feed the shared
+// boundary (display_primary_boundary -> generation_boundary) at the round
+// end, which breeds the next generation from them. The next generation's
+// genes are born at the round boundary, so the next round still starts
+// with zero hold (breeding is pure gene ops). Invariants: (1) while a
+// round is in flight the walked generation IS session.cur - the next one
+// does not exist yet (the boundary ensures it); (2) a generation's rows
+// are complete (all n cars, index order, natural terminals) before its
+// boundary; (3) one physics pipeline (pid_drive_car + step_sim) - the
+// pack race-end and the ghost finish (a pack skip's headless re-run of the
+// skipped cars) reuse it. A mid-run helix on -> off switch reconciles via
+// display_primary_takeover (in-flight GA work closed out; an FF lead
+// rewound to the walked generation; stale pending offers discarded).
+//
+// HELIX ON (FF): the GA runs free and primary - the pending slot tracks
+// the newest generation (last-write-wins) and the display re-simulates;
+// each displayed row is asserted equal to the eval's recorded result
+// (the live determinism gate; solo.last.complete re-arms it at every
+// adopt). The pack starts the same frame it is offered (its lineup needs
+// no ranking).
+//
+// Provisional start (both modes): at init, after a re-seed, and at every
+// boundary the views begin the generation whose GENES EXIST NOW, before
+// its eval has produced a single row.
+//
+// Pacing (the FF tick budget and generation offers): the canonical
+// contracts are step_session + offer_provisional.
 
 package main
 
@@ -95,10 +117,11 @@ view_mode := 1
 // everywhere (the GLES3 look).
 ao_enabled := true
 
-// Fast-forward toggle (the "evolve in background" control): OFF = in-sync
-// (the session runs at most one generation ahead of the displayed pack,
-// pausing while a snapshot is buffered); ON = the session runs freely and
-// the views take the newest offered generation at each transition.
+// Helix toggle (the "evolve in background" control): OFF = display-primary
+// (the session never evaluates; the displayed walk IS the eval and its
+// rows feed the boundary at the round end); ON = the GA runs free and
+// primary - the pending slot tracks the newest generation (last-write-
+// wins) and the views re-simulate with the live assert.
 bg_evolve := false
 
 // A shared link boots the app ON the shared car alone: a population-1
@@ -196,39 +219,31 @@ init_driver :: proc() {
 	cam = init_camera()
 }
 
-// Step the session within this frame's budget. Fast-forward ON → the
-// session runs freely (the pending slot tracks the newest generation,
-// last-write-wins, and the view takes it at the next transition). OFF →
-// in-sync: the session is at most ONE generation ahead of the display, and
-// only while the active view is CONSUMING it: the next gen's eval overlaps
-// the current run, and the view takes the completed snapshot at its end
-// with no hold. The cap is the single pending slot (an offer is blocked
-// while one is buffered, so a second next gen is unreachable) plus the gate
-// below: one boundary past the buffered snapshot, the session pauses again
-// until the view consumes. Holding also pauses. Paused (SPACE) → no ticks.
-//
-// A completed generation's recorded results are final: adopt them into the
-// views' copy of it (adopt_completed_gen - the solo's rows must match the
-// record, bit for bit), then offer the freshly-breed next generation from
-// its genes alone (offer_provisional).
+// Step the session within this frame's budget. Helix ON (FF) → the session
+// runs freely (the pending slot tracks the newest generation,
+// last-write-wins, and the view takes it at the next transition); a
+// completed generation's recorded results are adopted into the views' copy
+// of it (adopt_completed_gen - the solo's rows must match the record, bit
+// for bit) before the freshly-breed next generation is offered from its
+// genes alone. Helix OFF (display-primary) → the session NEVER evaluates:
+// the displayed walk IS the eval, and its rows feed the boundary at the
+// round end (display_primary_boundary - the shared code path with the GA's
+// eval completion); the offer alone hands the current generation to the
+// views (boot / re-seed / a just-bred boundary). Paused (SPACE) → no
+// offers or ticks.
 step_session :: proc(tick_budget: int) -> (Gen_Event, bool) {
 	if sim_paused || !session.running {return Gen_Event{}, false}
-	if showcase_mode {
-		// Showcase: the GA is NOT stepped (the car is shown, not evolved  - 
-		// its env is pinned, the population must not breed itself away);
-		// the offer alone hands the car to the views.
+	if showcase_mode || !bg_evolve {
+		// Showcase: the GA is NOT stepped (the car is shown, not evolved  -
+		// its env is pinned, the population must not breed itself away).
+		// Display-primary (helix off): the session never evaluates either  -
+		// the displayed walk IS the eval (see the header). In both, the
+		// offer alone hands the current generation to the views.
 		offer_provisional()
 		return Gen_Event{}, false
 	}
-	if !bg_evolve && solo_has_pending() {
-		consuming :=
-			(view_mode == 1 && solo_is_ready()) || (view_mode == 0 && pop_viewer_is_ready())
-		if !consuming || session.cur.index > solo.pending.index {
-			return Gen_Event{}, false
-		}
-	}
-	// The pacing scale sheds the background GA first (it is the larger CPU
-	// consumer and the least visible); a floor keeps the evolution moving.
+	// FF: the pacing scale sheds the background GA first (it is the larger
+	// CPU consumer and the least visible); a floor keeps it moving.
 	ticks := int(f32(tick_budget) * pacing_scale)
 	if ticks < 4 {ticks = 4}
 	ev, done := session_step(&session, ticks)
@@ -251,6 +266,91 @@ adopt_completed_gen :: proc(gen: int) {
 		solo_snapshot_complete(&solo.pending, &session.cur)
 	} else if len(solo.last.pop) > 0 && solo.last.index == gen && !solo.last.complete {
 		solo_adopt_results(&session.cur)
+	}
+}
+
+// Display-primary round boundary (helix off): the displayed walk of the
+// current generation just completed - its rows ARE the eval. The rows feed
+// the session's record (fits + res - the boundary's inputs), the shared
+// boundary (generation_boundary) consumes it - report + ratchets + line
+// extension + breed + the cur swap - and the fresh generation is offered
+// so the view's next round starts this same frame (zero hold: breeding is
+// pure gene ops).
+//
+// Invariant: the walked generation IS session.cur - the next generation
+// does not exist yet in this mode (the rows are what birth it). Enforced:
+// a stale or foreign row grid, or a walked gen out of line with the
+// session, is a driver bug, not a state to paper over.
+display_primary_boundary :: proc() {
+	if len(solo.last.pop) == 0 {return}
+	ensure(solo.last.index == session.cur.index)
+	ensure(solo.rows_gen == solo.last.index && solo.row_n == len(solo.last.pop))
+	n := len(solo.last.pop)
+	for i in 0 ..< n {
+		r := solo.rows[i]
+		ensure(r.car == i)
+		session.cur.fits[i] = r.score
+		res := &session.cur.res[i]
+		res^ = Eval_Result{}
+		res.fitness = r.score
+		res.best_x  = r.best_x
+		res.outcome = r.outcome
+		res.fail_time = r.time
+	}
+	session.cur.done = n
+	generation_boundary(&session)
+	offer_provisional()
+}
+
+// The pack race just ended (every car stopped at a natural terminal): in
+// display-primary the race IS the generation's eval - stamp the shared row
+// grid (reset: this race owns the record; a re-walk re-stamps it) from the
+// stopped sims, one row per car in index order.
+pack_stamp_rows :: proc() {
+	solo.rows = {}
+	solo.rows_gen = pop_viewer.last.index
+	solo.row_n = 0
+	for i in 0 ..< pop_viewer.n {
+		car := &pop_viewer.cars[i]
+		solo.rows[i] = row_from_run(i, &car.sim, car.genes.colors)
+		solo.row_n += 1
+	}
+}
+
+// Helix on -> off mid-session: the display takes over as the evaluator, so
+// the session must reconcile to the generation the display is walking.
+// The in-flight slots are closed out first (their worlds return to the
+// pool - the display's rows are now the eval; their partial work is
+// discarded, and if the helix is flipped back on the GA simply re-evaluates
+// the gen from scratch). With nothing on screen (or a re-seed's new
+// population in flight) the GA's current gen stands as is. With a walked
+// gen in flight: if the GA is still evaluating IT (cur == walked) there is
+// nothing else to do; if the FF GA RACED AHEAD (cur > walked) the session
+// rewinds to the walked gen - the display's snapshot carries the exact
+// genes the GA offered it, and the already-bred generations are discarded:
+// the display-primary boundary re-breeds from the rows when the walk
+// completes. (One gen_breed per boundary, as always - a mid-run mode switch
+// is a user action, the one case where the lineage diverges from a
+// pure-GA run of the same seed.)
+display_primary_takeover :: proc() {
+	scratch := Eval_Result{}
+	for i in 0 ..< len(session.slots) {
+		if !session.slots[i].active {continue}
+		slot_finish(&session.slots[i], &scratch)
+	}
+	session.cur.next = 0
+	session.cur.done = 0
+	// The pending offers belong to the lineage that just stood down - the
+	// walked generation (or the re-seed's re-roll) re-offers itself when
+	// the time comes; a stale one would put a discarded population on
+	// screen.
+	solo_clear_pending()
+	if len(solo.last.pop) == 0 || solo.last.index < reseed_min_gen {return}
+	if solo.last.index != session.cur.index {
+		copy(session.cur.pop[:], solo.last.pop[:])
+		session.cur.index = solo.last.index
+		session.cur.env = solo.last.env
+		env = session.cur.env
 	}
 }
 
@@ -372,8 +472,11 @@ hud_fill :: proc(hud: ^Hud_Data, show_pack: bool) {
 		solo_fill_cars(hud)
 		ready = solo_is_ready()
 	}
+	// A ghost finish (pack skip, helix off) holds the FROZEN pack on screen
+	// - show its hold text even though the pack is still "ready".
+	holding := !ready || (view_mode == 0 && pop_viewer.ghost)
 	hud.hold = ""
-	if !ready {
+	if holding {
 		if hold_reason != "" {
 			hud.hold = hold_reason
 		} else {
@@ -389,16 +492,21 @@ handle_controls :: proc(hud: ^Hud_Data) {
 		hud.toggle_pause = false
 	}
 	if hud.restart {
-		// Re-run the active view's current generation from its start. The
-		// panel's "best" record resets with the run - it is otherwise
-		// evolution-scoped (a new generation does NOT clear it).
-		pop_viewer_reset_record()
-		if view_mode == 1 && solo_is_ready() {
-			solo_build()
-		} else {
-			pop_viewer_restart()
-		}
 		hud.restart = false
+		if !pop_viewer.ghost {
+			// Re-run the active view's current generation from its start.
+			// The panel's "best" record resets with the run - it is
+			// otherwise evolution-scoped (a new generation does NOT clear
+			// it). (A restart during a ghost finish is deferred - the hold
+			// is seconds, the click is dropped: re-running the current gen
+			// would discard the eval the ghost is completing.)
+			pop_viewer_reset_record()
+			if view_mode == 1 && solo_is_ready() {
+				solo_build()
+			} else {
+				pop_viewer_restart()
+			}
+		}
 	}
 	if hud.reseed_track {
 		// New track. Displayed rows must match the GA record (the
@@ -469,11 +577,16 @@ handle_controls :: proc(hud: ^Hud_Data) {
 		hud.reseed_cars = false
 	}
 	if hud.view_requested {
-		view_mode = 1 - view_mode
-		hold_reason = ""
 		hud.view_requested = false
-		// The newly-active view replays the SAME current generation.
-		view_replay()
+		if !pop_viewer.ghost {
+			// The newly-active view replays the SAME current generation.
+			view_mode = 1 - view_mode
+			hold_reason = ""
+			view_replay()
+		}
+		// A view switch during a ghost finish is deferred - the hold is
+		// seconds, the click is dropped (a rebuild would discard the eval
+		// the ghost is completing).
 	}
 	if hud.evolve_from_here {
 		hud.evolve_from_here = false
@@ -484,25 +597,38 @@ handle_controls :: proc(hud: ^Hud_Data) {
 		}
 	}
 	if hud.ff_requested {
-		bg_evolve = hud.ff
+		on := hud.ff
 		hud.ff_requested = false
+		bg_evolve = on
+		if !on {
+			// Helix off: the display takes over as the evaluator -
+			// reconcile the session to the walked generation (in-flight GA
+			// work is closed out; an FF lead is rewound).
+			display_primary_takeover()
+		}
 	}
 	if hud.skip_requested {
 		// Skip to the next unit of the active view. Solo: run the current
 		// car to its natural terminal now (finish_now - the row MUST be
 		// stamped from a natural finish: a mid-run kill stamps a partial
-		// row that trips the determinism assert) and start the next car  - 
+		// row that trips the determinism assert) and start the next car  -
 		// or, on the last car, let the next frame's step branch take the
-		// pending next generation. Pack: destroy the race and consume the
-		// next snapshot (the in-sync session is always 1 gen ahead).
+		// next generation. Pack, helix on (FF): destroy the race and
+		// consume the next snapshot (the session is always running ahead).
+		// Pack, helix off (display-primary): the race IS the eval - the
+		// skipped cars cannot be thrown away (their rows would be missing
+		// and the next generation could not be bred): the ghost finishes
+		// them headless (the frozen pack stays on screen under a hold).
 		// Paused, the next unit waits for the pause to lift.
 		hud.skip_requested = false
 		if view_mode == 1 {
 			if solo.active {solo.finish_now = true}
-		} else {
-			if pop_viewer_is_ready() {
+		} else if pop_viewer_is_ready() && !pop_viewer.handoff {
+			if bg_evolve {
 				pop_viewer_destroy()
 				view_advance()
+			} else {
+				pack_skip_ghost()
 			}
 		}
 	}
@@ -540,6 +666,13 @@ step_active_view :: proc() {
 						// warm start, automatic.
 						showcase_evolve_from_here()
 					} else {
+						if !bg_evolve {
+							// Display-primary: the walk IS the eval - breed
+							// the next generation from the rows and offer
+							// it, so view_advance has its source this frame
+							// (zero hold).
+							display_primary_boundary()
+						}
 						view_advance()
 					}
 					break
@@ -557,16 +690,30 @@ step_active_view :: proc() {
 			// pack stays on screen frozen while the next generation's cars
 			// are staged a few per frame, then the buffers flip.
 			pack_handoff_step()
+		} else if pop_viewer.ghost {
+			// A skipped race is finishing headless (helix off): the frozen
+			// pack stays on screen (the dead-pack look) while its live cars
+			// run to their natural terminals off-screen; the rows complete
+			// and the boundary advances the generation.
+			ghost_step()
 		} else if pop_viewer_is_ready() {
 			steps := sim_paused ? 0 : viewer_speed
 			for _ in 0 ..< steps {
 				if !pop_viewer_step(frame_dt) {
 					if showcase_mode {
 						// Same as the solo path: the showcase's run is over
-						// (P is the pack view's only showcase entrance  - 
+						// (P is the pack view's only showcase entrance  -
 						// the strip hides the toggle there).
 						showcase_evolve_from_here()
 					} else {
+						if !bg_evolve {
+							// Display-primary: the race IS the eval - stamp
+							// the rows, breed + offer the next generation
+							// so the handoff has a source this frame (zero
+							// hold).
+							pack_stamp_rows()
+							display_primary_boundary()
+						}
 						// Race over: begin the handoff - keep the dead pack
 						// on screen, retrying each frame until the next
 						// snapshot is offered. No same-frame destroy +
@@ -587,9 +734,10 @@ step_active_view :: proc() {
 		}
 		// The staged teardown of the previous pack (a few worlds per frame)
 		// runs on every pack frame, paused or not - it only frees the
-		// off-screen old pack's resources.
+		// off-screen old pack's resources. (The ghost keeps its hold text:
+		// the pack is "ready" but frozen while the rows complete.)
 		pack_teardown_step()
-		if pop_viewer_is_ready() {hold_reason = ""}
+		if pop_viewer_is_ready() && !pop_viewer.ghost {hold_reason = ""}
 	}
 }
 

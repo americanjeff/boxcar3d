@@ -1,17 +1,29 @@
-// Population viewer: while the in-frame session runs, the main display
-// shows a real-time replay of the SHARED current generation - the WHOLE
-// population in index order (car i = index i), each in its OWN dedicated
-// Box3D world (bit-identical to the session's eval, no shared-solver
-// cross-talk), all spawning at the same straight-on pose, camera following
-// the CURRENT lead (re-selected every frame with hysteresis). Colors are
-// gene-hash only - nothing on screen correlates with the (still-unknown)
-// fitnesses, so no color predicts the outcome.
+// Population viewer: the main display shows a real-time replay of the
+// SHARED current generation - the WHOLE population in index order (car i =
+// index i), each in its OWN dedicated Box3D world (bit-identical to the
+// session's eval, no shared-solver cross-talk), all spawning at the same
+// straight-on pose, camera following the CURRENT lead (re-selected every
+// frame with hysteresis). Colors are gene-hash only - nothing on screen
+// correlates with the (still-unknown) fitnesses, so no color predicts the
+// outcome.
 //
 // The shared driver (loop.odin) publishes one shared generation snapshot
 // (a Generation value copy - see solo.odin); the pack races it from its
 // GENES ALONE (provisional) - the lineup needs no ranking, so it starts
 // the generation the same frame it is offered. Both targets drive this
 // viewer through the shared frame driver - single-threaded.
+//
+// GHOST FINISH (helix off / display-primary): the race IS the eval, so a
+// pack skip (loop.odin's skip control) must still complete the rows before
+// the boundary. pack_skip_ghost freezes the on-screen pack (every car
+// stopped; the pack never moves again) and re-runs each skipped car FROM
+// SPAWN in a throwaway world (ghost_start / ghost_step) - one car per
+// frame, GHOST_TICKS_PER_FRAME backstop. The re-run is the same
+// spawn_rollout the GA's slots use, so every row equals the GA's record
+// for that generation (evolvetest gate B); stamping by index lets the
+// cars finish in any order. View toggle / restart / re-seed cancel the
+// ghost (pop_viewer_destroy disposes the throwaway world); the pack
+// handoff to the next round starts when the last ghost row lands.
 
 package main
 
@@ -101,6 +113,20 @@ Pop_Viewer :: struct {
 	// (cuts) to the new lead this frame instead of the 10% lerp. Cleared by
 	// the render path after use.
 	cam_cut:             bool,
+	// Ghost finish (pack skip, helix off): the skipped cars' runs are
+	// finishing headless - the pack stays on screen frozen (the dead-pack
+	// look) while their runs re-run in the throwaway world below to their
+	// natural terminals, so the row set completes and the next generation
+	// can be bred.
+	ghost:               bool,
+	// The car currently running in the throwaway world (its index = the
+	// row stamped when the re-run ends).
+	ghost_i:             int,
+	// The throwaway re-run's own world + genome (spawn_rollout - the same
+	// one the GA's slots use, so the re-run is bit-identical to the GA's
+	// rollout of the same genome on the same env). Never rendered.
+	ghost_sim:           Sim_State,
+	ghost_g:             Genome,
 }
 
 pop_viewer: Pop_Viewer
@@ -230,6 +256,14 @@ viewer_destroy_car :: proc(slot: ^Viewer_Car) {
 }
 
 pop_viewer_destroy :: proc() {
+	// A ghost finish is cancelled with the pack (the re-seed / restart /
+	// toggle paths all destroy: their abandon of the eval supersedes it) -
+	// the throwaway run goes with it.
+	if pop_viewer.ghost {
+		destroy_sim(&pop_viewer.ghost_sim)
+		destroy_genome(&pop_viewer.ghost_g)
+	}
+	pop_viewer.ghost = false
 	// An in-flight handoff is aborted first: its staged cars + gen copy
 	// are freed now (the caller is taking over the pack immediately).
 	if pop_viewer.handoff {
@@ -364,6 +398,115 @@ pack_teardown_step :: proc() {
 		free_generation_copy(&pop_viewer.teardown_gen)
 		pop_viewer.teardown_gen = Generation{}
 	}
+}
+
+// ── Ghost finish (pack skip, helix off) ─────────────────────────────────
+// A skipped race cannot be thrown away: in display-primary the race IS the
+// eval, and its rows are what breed the next generation. The still-live
+// cars' runs re-run to their natural terminals in a THROWAWAY world
+// (spawn_rollout - the same one the GA's slots use, so the re-run is
+// bit-identical to the GA's rollout of the same genome on the same env;
+// re-running from spawn instead of continuing the on-screen sim keeps the
+// visible pack truly frozen - render_bot_mesh reads live body poses).
+// One car at a time, the same 4096-tick-per-frame backstop as the solo's
+// finish_now (a pause holds the step). The pack on screen stays frozen
+// (the dead-pack look; `stopped` also drops the cars from lead selection),
+// under a "finishing..." hold. Rows are stamped BY INDEX (the stopped cars
+// at skip time, the re-run cars as their terminals land - in any order);
+// when the last row lands the grid is complete and the boundary advances
+// the generation, handing off over the frozen pack as a normal race end.
+GHOST_TICKS_PER_FRAME :: 4096
+
+// Start the throwaway re-run of car `i` on the pack's env.
+ghost_start :: proc(i: int) {
+	pop_viewer.ghost_i = i
+	g := decode_genes(&pop_viewer.cars[i].genes)
+	pop_viewer.ghost_g = g
+	pop_viewer.ghost_sim = spawn_rollout(&pop_viewer.ghost_g, pop_viewer.last.env)
+}
+
+// Enter the ghost: stamp the already-stopped cars' rows (the grid is
+// reset - this race owns the generation's record) and freeze the live
+// ones; the first of them starts its throwaway re-run. A skip that lands
+// on the race's last frame (nobody live) completes immediately.
+pack_skip_ghost :: proc() {
+	if pop_viewer.ghost {return} // a finish is already in flight
+	solo.rows = {}
+	solo.rows_gen = pop_viewer.last.index
+	solo.row_n = 0
+	first := -1
+	for i in 0 ..< pop_viewer.n {
+		car := &pop_viewer.cars[i]
+		if car.sim.failed || car.sim.finished {
+			solo.rows[i] = row_from_run(i, &car.sim, car.genes.colors)
+		} else {
+			// Frozen on screen (never stepped again - the re-run happens in
+			// the throwaway world).
+			car.frozen_pitch = chassis_pitch(car.sim.bot.chassis)
+			car.stopped = true
+			if first < 0 {first = i}
+		}
+	}
+	if first < 0 {
+		solo.row_n = len(solo.last.pop)
+		display_primary_boundary()
+		hold_reason = ""
+		pack_handoff_begin(false)
+		return
+	}
+	ghost_start(first)
+	pop_viewer.ghost = true
+	hold_reason = "finishing..."
+}
+
+// One frame of the ghost: run the throwaway car to its terminal (bounded),
+// stamp its row, and move to the next live car - or close out.
+ghost_step :: proc() {
+	if sim_paused {return}
+	i := pop_viewer.ghost_i
+	for _ in 0 ..< GHOST_TICKS_PER_FRAME {
+		pid_drive_car(&pop_viewer.ghost_sim, PID_COEFF)
+		step_sim(&pop_viewer.ghost_sim)
+		if pop_viewer.ghost_sim.failed || pop_viewer.ghost_sim.finished {break}
+	}
+	if !pop_viewer.ghost_sim.failed && !pop_viewer.ghost_sim.finished {
+		return // the re-run continues next frame
+	}
+	// Terminal: stamp the row from the throwaway run's terminal (the on-
+	// screen car is frozen mid-run - its row comes from the re-run, which
+	// is bit-identical to what the display run would have produced), and
+	// let the terminal's score feed the evolution-scoped record.
+	car := &pop_viewer.cars[i]
+	row := row_from_run(i, &pop_viewer.ghost_sim, car.genes.colors)
+	solo.rows[i] = row
+	bump_best_screen(row.score, &car.genes, pop_viewer.last.env,
+		u32(math.round(pop_viewer.ghost_sim.sim_time / TIME_STEP)))
+	destroy_sim(&pop_viewer.ghost_sim)
+	destroy_genome(&pop_viewer.ghost_g)
+	nxt := -1
+	for j := i + 1; j < pop_viewer.n; j += 1 {
+		c := &pop_viewer.cars[j]
+		if !c.sim.failed && !c.sim.finished {
+			nxt = j
+			break
+		}
+	}
+	if nxt < 0 {
+		ghost_done()
+		return
+	}
+	ghost_start(nxt)
+}
+
+// The last row is in: the grid is complete - breed the next generation
+// (the shared boundary) and begin the handoff over the frozen dead pack,
+// exactly as a normal race end.
+ghost_done :: proc() {
+	pop_viewer.ghost = false
+	solo.row_n = len(solo.last.pop)
+	display_primary_boundary()
+	hold_reason = ""
+	pack_handoff_begin(false)
 }
 
 // Step every live car's own world. A car is DONE when its run ends -

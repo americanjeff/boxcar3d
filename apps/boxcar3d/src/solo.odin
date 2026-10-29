@@ -7,21 +7,24 @@
 // (see Pop_Viewer.best_screen).
 //
 // PROVISIONAL START: the view begins a generation from its GENES ALONE -
-// at init, after a re-seed, and at every generation boundary - before the
-// session has evaluated it. Each row finalizes to the DISPLAY RUN'S OWN
-// terminal.
+// at init, after a re-seed, and at every generation boundary - before its
+// eval has produced a single row. Each row finalizes to the DISPLAY RUN'S
+// OWN terminal.
 //
-// DETERMINISM GATE: a displayed run is a bit-identical re-simulation of the
-// session's rollout of the same genome (same course + finish line, spawn
-// pose, PID, world - spawn_rollout in evolve.odin is the one copy). Rows
-// are asserted EQUAL to the recorded results - solo_adopt_results (rows
-// already finalized) and solo_finish_car (each row as it finalizes). A
-// mismatch is a determinism bug and crashes.
+// DETERMINISM (per mode): a displayed run is a bit-identical re-simulation
+// of the session's rollout of the same genome (same course + finish line,
+// spawn pose, PID, world - spawn_rollout in evolve.odin is the one copy).
+// In HELIX-ON (FF) the rows are asserted EQUAL to the recorded results -
+// solo_adopt_results (rows already finalized) and solo_finish_car (each
+// row as it finalizes; armed while solo.last.complete) - a mismatch is a
+// determinism bug and crashes. In HELIX-OFF (display-primary) there is no
+// recorded result to assert against: the rows ARE the eval and feed the
+// boundary (row_from_run -> display_primary_boundary, loop.odin).
 //
 // Both targets run it through the shared frame driver (loop.odin); the
-// session publishes the snapshot in-frame (provisional at birth, completed
-// in place at the eval boundary) and the pending/last handoff is
-// single-threaded. The pack view races the same Generation, whole
+// session publishes the snapshot in-frame (provisional at birth; in FF
+// completed in place at the eval boundary) and the pending/last handoff
+// is single-threaded. The pack view races the same Generation, whole
 // population, from a complete OR provisional snapshot (the lineup needs no
 // ranking).
 
@@ -38,14 +41,33 @@ SOLO_MAX :: 24
 
 // One completed run's row (Car / Score / Time). Stamped from the display
 // run's own terminal - equal to the GA's record (asserted when the record
-// is available; see the header).
+// is available; see the header). In helix-off (display-primary) the rows
+// ARE the generation's eval: display_primary_boundary (loop.odin) feeds
+// them into the session's record and the shared boundary breeds from them.
 Solo_Row :: struct {
 	car:     int, // population index (Flash's "Car")
 	score:   f64, // distance driven (m) - the display run's rollout_score_m
+	best_x:  f32, // ratcheted farthest chassis x - the row's Eval_Result half (the boundary's line-extension ratchet reads rollout_score_m(best_x, line))
 	time:    f32, // run duration (s) - the display run's sim clock
 	outcome: Rollout_Outcome,
 	colors:  [N_COLORS][3]u8, // the car's 16-slot palette (matches the car on screen)
 	pitch:   f32, // chassis pitch (rad) frozen at the run's end - the portrait keeps its last tilt
+}
+
+// Stamp one row from a display run's terminal - the SAME derivation the
+// GA uses in slot_finish (rollout_score_m on the ratcheted best, the sim's
+// clock, outcome_of, the chassis tilt at the terminal). One copy for the
+// solo walk, the pack race-end (pack_stamp_rows), and the ghost finish.
+row_from_run :: proc(car: int, sim: ^Sim_State, colors: [N_COLORS][3]u8) -> Solo_Row {
+	return Solo_Row {
+		car     = car,
+		score   = rollout_score_m(sim.stall_best_x, sim.track_end),
+		best_x  = sim.stall_best_x,
+		time    = sim.sim_time,
+		outcome = outcome_of(sim),
+		colors  = colors,
+		pitch   = chassis_pitch(sim.bot.chassis),
+	}
 }
 
 // The view's copy of the shared generation (evolve.odin's Generation) is a
@@ -109,7 +131,9 @@ solo_push :: proc(p: Generation) {
 	solo.pending = p
 }
 
-// Is a snapshot waiting? (the in-sync cap read)
+// Is a snapshot waiting? (the display-primary offer read: the pending is
+// occupied only within the frame it is offered - the walk takes it in the
+// same frame's view step).
 solo_has_pending :: proc() -> bool {
 	return len(solo.pending.pop) > 0
 }
@@ -335,19 +359,12 @@ solo_step :: proc(frame_dt: f32) -> bool {
 }
 
 // A car just ended: stamp its row from the DISPLAY RUN'S OWN terminal
-// (derived exactly as slot_finish derives the GA's: rollout_score_m on the
-// ratcheted best, the sim's clock, outcome_of), check it against the record
-// when available, tear down, and start the next car.
+// (row_from_run - the same derivation slot_finish gives the GA's record),
+// check it against the record when available, tear down, and start the
+// next car.
 solo_finish_car :: proc() {
 	i := solo.cur
-	solo.rows[solo.row_n] = Solo_Row {
-		car     = i,
-		score   = rollout_score_m(solo.car.stall_best_x, solo.car.track_end),
-		time    = solo.car.sim_time,
-		outcome = outcome_of(&solo.car),
-		colors  = solo.colors,
-		pitch   = chassis_pitch(solo.car.bot.chassis), // frozen before teardown
-	}
+	solo.rows[solo.row_n] = row_from_run(i, &solo.car, solo.colors)
 	if solo.last.complete {check_solo_row(i)}
 	solo.row_n += 1
 	destroy_sim(&solo.car)

@@ -195,10 +195,12 @@ build_wasm() {
 	# The single web entry: static HTML (see tools/web/index_template.html).
 	sed "s#@TITLE@#$TITLE#g; s#@PROJECT@#$APP#g; s#@OG_URL@#${SITE_URL:-}#g; s#@OG_DESCRIPTION@#${OG_DESCRIPTION:-}#g; s#@OG_IMAGE@#${SITE_URL:-}/${OG_IMAGE:-}#g" \
 		"$ROOT/tools/web/index_template.html" > "$OUT/index.html"
-	# Apps without a published site (no SITE_URL) ship no og: tags at all —
-	# empty og:url/og:image would be worse than absent.
+	# Apps without a published site (no SITE_URL) ship no og: tags, no meta
+	# description, and no canonical at all — empty values would be worse
+	# than absent.
 	if [ -z "${SITE_URL:-}" ]; then
-		grep -v 'property="og:' "$OUT/index.html" > "$OUT/index.html.tmp" \
+		grep -vE 'property="og:|name="description"|rel="canonical"' "$OUT/index.html" \
+			> "$OUT/index.html.tmp" \
 			&& mv "$OUT/index.html.tmp" "$OUT/index.html"
 	fi
 

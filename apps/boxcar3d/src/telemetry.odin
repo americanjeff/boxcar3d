@@ -7,9 +7,10 @@
 //
 // Stall diagnostics (field meanings are on the struct): t is wall seconds
 // since boot (slope = fps probe); the render branch is viewer / scene_idle;
-// a pack that never ends parks the in-sync GA (pv live flat, pv_age
-// climbs); in_age climbing while the user works = events reaching the
-// socket but never the UI.
+// a pack that never ends shows pv live flat + pv_age climbing (in FF the GA
+// runs ahead meanwhile - ga_run=1, ga_gen climbs; in display-primary the
+// GA is idle - the walk IS the eval); in_age climbing while the user works
+// = events reaching the socket but never the UI.
 //
 // Native only.
 
@@ -46,7 +47,7 @@ Telemetry :: struct {
 	pv_age:        int, // seconds since the pack was built; -1 when none
 	ga_gen:        int, // GA generation; -1 when the GA is reaped
 	ga_run:        i32, // 1 while the GA driver's stop flag is not set
-	ga_wait:       i32, // 1 in step mode blocked on the pack to end
+	ga_wait:       i32, // 1 while display-primary holds an offered-but-not-taken gen (same-frame only; FF never parks)
 	input_events:  int, // input events processed since boot
 	input_age:     int, // frames since the last input event; -1 when none
 	// Score-panel churn probe (the list flicker): how many rows hold a

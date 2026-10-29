@@ -88,7 +88,9 @@ app_frame :: proc() {
 	if len(session.cur.pop) > 0 {
 		ga_gen = session.cur.index
 		ga_run = i32(session.running)
-		// "Parked" = the in-sync session is paused on a buffered snapshot.
+		// "Parked" = display-primary holding an offered-but-not-taken
+		// generation (only same-frame: the walk takes the offer within the
+		// frame it is offered, so this reads 0 in steady state).
 		ga_wait = i32(session.running && !bg_evolve && solo_has_pending())
 	}
 
@@ -152,9 +154,12 @@ app_frame :: proc() {
 	crash.telemetry_flush_tick(f32(1.0 / 60.0))
 
 	// Overlay the microui command list on top, then the car portraits
-	// (the icon-atlas quads - same overlay frame, same one-frame flush).
+	// (the icon-atlas quads - same overlay frame, same one-frame flush),
+	// and the tooltip LAST: the overlay pass is a flat painter (no depth
+	// test), so it must be issued after the portraits to float over them.
 	render_ui_commands(&ui_ctx)
 	car_icon_render(&hud)
+	ui_tooltip_render()
 }
 
 left_down := false

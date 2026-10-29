@@ -21,6 +21,7 @@ package main
 
 import "core:fmt"
 import "core:sort"
+import "core:time"
 import host "engine:apphost"
 import gfx "engine:graphics"
 import "vendor:microui"
@@ -244,12 +245,79 @@ ui_text :: proc(rect: microui.Rect, str: string, col: microui.Color,
 	microui.draw_text(&ui_ctx, font, str, pos, col)
 }
 
+// Tooltips: a hovered control's tip, drawn after TOOLTIP_DELAY of
+// stationary hover (ui.odin records the candidate in build_ui,
+// ui_tooltip_render draws it last in the overlay frame - see the frame
+// drivers). ui_tip_tag/t0 persist
+// across frames so the delay accumulates on the same control; a frame
+// with no hovered tip clears them, so re-hovering restarts the delay.
+TOOLTIP_DELAY :: 700 * time.Millisecond
+
+ui_tip_tag: string
+ui_tip_t0:  time.Time
+ui_tip_rect: microui.Rect
+ui_tip_text: string
+ui_tip_hovering := false
+
+// The control carries a tip and the mouse is over it (update_control set
+// hover_id) - it is this frame's tooltip candidate.
+ui_tip_note :: proc(tag: string, bid: microui.Id, rect: microui.Rect, tip: string) {
+	if tip == "" || ui_ctx.hover_id != bid {
+		return
+	}
+	ui_tip_hovering = true
+	ui_tip_rect = rect
+	ui_tip_text = tip
+	if tag != ui_tip_tag {
+		ui_tip_tag = tag
+		ui_tip_t0 = time.now()
+	}
+}
+
+// The hovered control's tooltip: a dark bar below the control (flipped
+// above when there is no room), clamped to the screen. Drawn LAST in the
+// overlay frame (after the microui command list AND the car portraits -
+// the overlay pass is a flat painter, so issue order = z-order), in the
+// frame drivers' app_frame / wasm_frame after car_icon_render. The SDF
+// outline params set by render_ui_commands are still in effect, so the
+// text gets the same contrast rim as the rest of the panel.
+ui_tooltip_render :: proc() {
+	if !ui_tip_hovering || time.since(ui_tip_t0) < TOOLTIP_DELAY {
+		return
+	}
+	fb_w, fb_h := gfx.Framebuffer_Size()
+	panel_margin := i32(f32(PANEL_MARGIN) * ui_dpp)
+	lh := i32(f32(FONT_LINE_HEIGHT) * ui_dpp)
+	pad := i32(f32(6) * ui_dpp)
+	gap := i32(f32(4) * ui_dpp)
+	tw := ui_ctx.text_width(ui_ctx.style.font, ui_tip_text)
+	w := tw + 2 * pad
+	h := lh + 2 * pad
+	x := ui_tip_rect.x
+	y := ui_tip_rect.y + ui_tip_rect.h + gap
+	if y + h > fb_h - panel_margin {
+		// No room below the control: flip above it.
+		y = ui_tip_rect.y - gap - h
+	}
+	if x + w > fb_w - panel_margin {x = fb_w - panel_margin - w}
+	if x < panel_margin {x = panel_margin}
+	gfx.Overlay_Rect(f32(x), f32(y), f32(w), f32(h), {0.06, 0.06, 0.06, 0.92})
+	draw_text(
+		ui_tip_text,
+		microui.Vec2{x + pad, y + (h - lh) / 2},
+		mu_color_to_f32(ui_def_text),
+		1.0,
+	)
+}
+
 // Bare icon button: no frame, the glyph IS the control. Click detection
 // is the low-level update_control with a unique id from `tag`
 // (microui.button won't do this job: it stretches its built-in icon
 // across the whole rect, an empty label hashes EVERY such button to one
-// shared id, and it draws the frame we don't want).
-ui_button_icon :: proc(tag: string, rect: microui.Rect, icon: Ui_Icon, lit: bool) -> bool {
+// shared id, and it draws the frame we don't want). `tip` (optional) is
+// the tooltip text, shown after a stationary hover.
+ui_button_icon :: proc(tag: string, rect: microui.Rect, icon: Ui_Icon, lit: bool,
+						tip: string = "") -> bool {
 	bid := microui.get_id(&ui_ctx, tag)
 	microui.update_control(&ui_ctx, bid, rect)
 	submit := ui_ctx.mouse_pressed_bits == {.LEFT} && ui_ctx.focus_id == bid
@@ -259,16 +327,20 @@ ui_button_icon :: proc(tag: string, rect: microui.Rect, icon: Ui_Icon, lit: bool
 		{rect.x + (rect.w - is) / 2, rect.y + (rect.h - is) / 2, is, is},
 		ui_btn_col(lit, ui_ctx.hover_id == bid),
 	)
+	ui_tip_note(tag, bid, rect, tip)
 	return submit
 }
 
 // Bare text segment (the speed control): the label is the button  - 
-// outlined text, no frame.
-ui_button_seg :: proc(tag: string, rect: microui.Rect, label: string) -> bool {
+// outlined text, no frame. `tip` (optional) is the tooltip text, shown
+// after a stationary hover.
+ui_button_seg :: proc(tag: string, rect: microui.Rect, label: string,
+						tip: string = "") -> bool {
 	bid := microui.get_id(&ui_ctx, tag)
 	microui.update_control(&ui_ctx, bid, rect)
 	submit := ui_ctx.mouse_pressed_bits == {.LEFT} && ui_ctx.focus_id == bid
 	ui_text(rect, label, ui_btn_col(false, ui_ctx.hover_id == bid))
+	ui_tip_note(tag, bid, rect, tip)
 	return submit
 }
 
@@ -375,6 +447,8 @@ portrait_row_size :: proc(c: ^Hud_Car, row_h: i32, pw_max: i32) -> (pw, ph: i32)
 build_ui :: proc(hud: ^Hud_Data) {
 	microui.begin(&ui_ctx)
 
+	ui_tip_hovering = false
+
 	fb_w, _ := gfx.Framebuffer_Size()
 
 	// The pane is exactly the top row's width (see the header for the
@@ -444,7 +518,8 @@ build_ui :: proc(hud: ^Hud_Data) {
 		// on screen sits right beside it (with FF ON the second number is
 		// how far ahead the session has run).
 		if !hud.showcase {
-			if ui_button_icon("ff", {x, by, icon_s, bh}, .HELIX, hud.ff) {
+			if ui_button_icon("ff", {x, by, icon_s, bh}, .HELIX, hud.ff,
+								"Evolve in the background") {
 				hud.ff = !hud.ff
 				hud.ff_requested = true
 			}
@@ -452,18 +527,21 @@ build_ui :: proc(hud: ^Hud_Data) {
 			ui_text({x, by, gen_tw, lh}, gen_num, ui_def_text)
 			x += gen_tw + btn_gap
 		}
-		if ui_button_icon("play", {x, by, icon_s, bh}, hud.paused ? Ui_Icon.PLAY : .PAUSE, false) {
+		if ui_button_icon("play", {x, by, icon_s, bh}, hud.paused ? Ui_Icon.PLAY : .PAUSE, false,
+							hud.paused ? "Play" : "Pause") {
 			hud.toggle_pause = true
 		}
 		x += icon_s + btn_gap
-		if ui_button_icon("skip", {x, by, icon_s, bh}, .SKIP, false) {
+		if ui_button_icon("skip", {x, by, icon_s, bh}, .SKIP, false,
+							hud.view == 0 ? "Skip to the next generation" : "Skip to the next car") {
 			// Next unit in the active view - the driver consumes the request.
 			hud.skip_requested = true
 		}
 		x += icon_s + btn_gap
 		// The die: normal mode re-seeds the cars; in the showcase it is
 		// "evolve from here" (a full population from the shared car).
-		if ui_button_icon("die", {x, by, icon_s, bh}, .DICE, false) {
+		if ui_button_icon("die", {x, by, icon_s, bh}, .DICE, false,
+							hud.showcase ? "Evolve from here" : "Re-seed the cars") {
 			if hud.showcase {
 				hud.evolve_from_here = true
 			} else {
@@ -475,7 +553,8 @@ build_ui :: proc(hud: ^Hud_Data) {
 			// The pack toggle: the glyph is ALWAYS the scattered trio, so
 			// the button says "pack" no matter the state; lit = concurrent
 			// pack on, off (default) = serial solo.
-			if ui_button_icon("view_pack", {x, by, icon_s, bh}, .CARS3, hud.view == 0) {
+			if ui_button_icon("view_pack", {x, by, icon_s, bh}, .CARS3, hud.view == 0,
+								"Toggle the pack view") {
 				hud.view_requested = true
 			}
 			x += icon_s + btn_gap
@@ -486,7 +565,8 @@ build_ui :: proc(hud: ^Hud_Data) {
 					idx = i
 				}
 			}
-			if ui_button_seg("speed", {x, by, btn_seg, bh}, SPEED_SEGS[idx].label) {
+			if ui_button_seg("speed", {x, by, btn_seg, bh}, SPEED_SEGS[idx].label,
+								"Sim speed (cycles 1x to 8x)") {
 				hud.speed = SPEED_SEGS[(idx + 1) % len(SPEED_SEGS)].n
 			}
 			x += btn_seg + btn_gap
@@ -499,7 +579,7 @@ build_ui :: proc(hud: ^Hud_Data) {
 		x += best_tw + btn_gap
 		// The share glyph: opens the share popup (wasm DOM overlay; inert
 		// native, where the shims no-op).
-		if ui_button_icon("share", {x, by, icon_s, bh}, .SHARE, false) {
+		if ui_button_icon("share", {x, by, icon_s, bh}, .SHARE, false, "Share this car") {
 			hud.share_requested = true
 		}
 
@@ -635,6 +715,10 @@ build_ui :: proc(hud: ^Hud_Data) {
 			)
 			microui.end_window(&ui_ctx)
 		}
+	}
+
+	if !ui_tip_hovering {
+		ui_tip_tag = ""
 	}
 
 	microui.end(&ui_ctx)
