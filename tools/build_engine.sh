@@ -44,6 +44,7 @@ ODIN_ROOT="$(odin root)"
 B3SRC="$ODIN_ROOT/vendor/box3d/src"
 B3INC="$B3SRC/include"
 SOKOL="$ROOT/vendor/sokol"
+STB="$ROOT/vendor/stb"
 FORK="$ROOT/engine/graphics/renderer"
 KANN="$ROOT/vendor/kann"
 CMAES="$ROOT/vendor/cmaes"
@@ -85,7 +86,7 @@ ensure_wasm_clang() {
 
 # Common include roots (the forked renderer keeps the upstream "gfx/..."
 # include convention; shaders are committed with both glsl430 + wgsl branches).
-INC_COMMON=(-I"$B3INC" -I"$SOKOL" -I"$FORK" -I"$FORK/shaders/generated")
+INC_COMMON=(-I"$B3INC" -I"$SOKOL" -I"$STB" -I"$FORK" -I"$FORK/shaders/generated")
 
 build_physics_native() {
 	# libphysics_native.a is empty by design: the sim runs on the

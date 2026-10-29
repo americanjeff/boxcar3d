@@ -29,6 +29,7 @@ B3ROOT="$ODIN_ROOT/vendor/box3d"
 B3_LIB="$B3ROOT/lib/linux-$(uname -m)/libbox3d.a"
 [ -f "$B3_LIB" ] || B3_LIB="$B3ROOT/lib/linux-amd64/libbox3d.a"
 SOKOL="$ROOT/vendor/sokol"
+STB="$ROOT/vendor/stb"
 FORK="$ROOT/engine/graphics/renderer"
 BUILD="$ROOT/build/native"
 mkdir -p "$BUILD"
@@ -36,9 +37,10 @@ mkdir -p "$BUILD"
 # Include roots:
 #   toolchain vendor/box3d/src/include   box3d/ headers   (box3d/box3d.h)
 #   vendor/sokol                         sokol headers    (sokol_gfx.h)
+#   vendor/stb                           stb headers      (stb_truetype.h)
 #   engine/graphics/renderer             forked renderer  (gfx/renderer.h)
 #   engine/graphics/renderer/shaders/generated   committed .glsl.h
-INC=(-I"$B3ROOT/src/include" -I"$SOKOL" -I"$FORK" -I"$FORK/shaders/generated")
+INC=(-I"$B3ROOT/src/include" -I"$SOKOL" -I"$STB" -I"$FORK" -I"$FORK/shaders/generated")
 case "$BACKEND" in
 	gles3)
 		SUFFIX="_gles3"

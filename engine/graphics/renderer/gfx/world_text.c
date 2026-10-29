@@ -12,7 +12,7 @@
 #include "world_text.glsl.h"
 
 #define STB_TRUETYPE_IMPLEMENTATION
-#include "stb_truetype.h"
+#include <stb_truetype.h>
 
 #include <math.h>
 #include <sokol_app.h>
